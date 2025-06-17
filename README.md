@@ -96,9 +96,14 @@ To successfully run the project, follow these steps:
 5. Pyhton 3.10 installation: Install from the official [Python site](https://www.python.org/downloads/release/python-3100/)
 and make sure to check “Add Python to PATH”.
 
-To verify the installation, please execute the following in your terminal/bash: python3.10 --version
+    - To verify the installation, please execute the following in your terminal/bash
+   ```{bash}
+   python3.10 --version
+   ```
 
 6. Creation of virtual environment: Once the program is install, it is required to set up a virtual environment to manage Python dependencies independently.
+
+    - Execute the following in your terminal/bash
 
 ```{bash}
 # Navigate to your project directory
@@ -120,19 +125,6 @@ pip install --upgrade pip
 pip install tensorflow numpy h5py scipy
 
 ```
-
-## Usage
-
-Once the project is set up and running, users can utilize the various data processing and visualization features seamlessly. The project enables web scraping to collect book cover images and extract dominant colors, allowing for an in-depth analysis of color trends across different authors and genres. Users can explore the most frequently used colors for different authors, genres, and sources, comparing trends.
-
-## Features
-
-This project offers the following features:
-
-1.  Data Collection (`scrap_books)`: Load book metadata, including title, author, and cover image.
-2.  Color Extraction (`extract_colors)`: Identify dominant colors from book cover images.
-3.  Clustering & Cleaning: Group similar colors and remove duplicates.
-4.  Visualization: Generate plots and applications ([shiny](https://mariacarda.shinyapps.io/data_harvesting_books/)) showing color distribution by author, webpage and category.
 
 ## Note on data availability
 
