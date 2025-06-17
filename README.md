@@ -12,11 +12,12 @@ The objective of this project is to detect and analyze the presence of sexist di
 
 The thesis project consists of the following components:
 
-1.  <u>Data Harvesting Processing</u>: extraction of parliamentary intervention data from official Spanish Congress and government websites using web scraping techniques. This included gathering official transcripts from the XIV Legislature legislative sessions.
-2.  <u>Data Processing & Interventions Extraction</u>: cleaning of raw text data (removal of HTML, normalization, etc.) and extraction of relevant variables such as speaker gender, political party, interventor name, full intervention text, session agenda, and date. 
+1.  <u>Data Harvesting Processing</u>: extraction of official transcripts belonging to the XIV Legislature period (2019 - 2023) from Spanish Congress and government websites using web scraping techniques, *RSelenium* and *rvest*.
+2.  <u>Data Processing & Interventions Extraction</u>: standardization and structure raw text data, extracting key fields such as speaker name, party, gender, intervention text, and agenda item.
+   - For texts that deviate from standard formatting, specialized functions like *extraer_orden_dia* and *extraer_orden_dia_excepcion* are used to handle exceptions and ensure consistency across the dataset.
 3.  <u>Data Annotation</u>: usage of OpenAI's gpt-4o-mini model via API to annotate 30,924 interventions. For each, the model identified (1) whether sexist content was present, (2) the specific sexist fragment, and (3) the type of sexism according to the theoretical framework of the thesis.
 4.  <u>Data Analysis</u>: descriptive analysis of sexist interventions, including frequency by party and gender, typology distributions, and temporal patterns. 
-4.  <u>Machine learning models</u>: development and evaluation of models using NNET, Random Forest, XGBoost, LSTM, and Keras, which were assessed using standard performance metrics (accuracy, F1, AUC).
+5.  <u>Machine learning models</u>: development and evaluation of models using NNET, Random Forest, XGBoost, LSTM, and Keras, which were assessed using standard performance metrics (accuracy, F1, AUC).
 
 ## Required packages
 
@@ -97,11 +98,12 @@ To successfully run the project, follow these steps:
 and make sure to check “Add Python to PATH”.
 
     - To verify the installation, please execute the following in your terminal/bash
-   ```{bash}
+
+    ```{bash}
    python3.10 --version
    ```
 
-6. Creation of virtual environment: Once the program is install, it is required to set up a virtual environment to manage Python dependencies independently.
+7. Creation of virtual environment: Once the program is install, it is required to set up a virtual environment to manage Python dependencies independently.
 
     - Execute the following in your terminal/bash
 
@@ -128,9 +130,13 @@ pip install tensorflow numpy h5py scipy
 
 ## Note on data availability
 
-Due to size and storage limitations, the text (*textos.csv*) and interventions (*completado.csv*) datasets included in this repository contain **only sample subsets** of the full data. **The complete databases are not publicly included here**.
+Due to size and storage limitations, the text (*textos_sample.csv*) and interventions (*completado_sample.csv*) datasets included in this repository contain **only sample subsets** of the full data. **The complete databases are not publicly included here**.
 
 If you require access to the full datasets for your research or project, please contact the project administrator at: 100419840@alumnos.uc3m.es
+
+## Usage
+
+Once the project is set up and all dependencies are installed, users can execute the full pipeline from web scraping to machine learning. The workflow is modular, allowing for flexible use of individual components such as scraping, annotation, or modeling depending on research needs.
 
 ## Future Enhancements
 
@@ -146,4 +152,4 @@ This project offers a meaningful exploration of sexism within parliamentary disc
 
 ## Disclaimer
 
-This project was developed exclusively for academic purposes as part of my final thesis for the Master in Computational Social Science at Carlos III University. The code and materials provided are intended for research and educational use only. **Commercial use is strictly prohibited**. For permissions or inquiries, please contact the project administrator.
+This project was developed exclusively for academic purposes as part of my final thesis for the Master in Computational Social Science at Carlos III University. The code and materials provided are intended for research and educational use only. **Commercial use is strictly prohibited**. For permissions or inquiries, please contact the administrator.
