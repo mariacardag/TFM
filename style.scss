@@ -1,0 +1,104 @@
+/*-- scss:defaults --*/
+
+// Theme identifier
+$theme: "ath" !default;
+
+// Font import
+@import url('https://fonts.googleapis.com/css2?family=Alkatra:wght@400;500;600;700&family=KoHo:ital,wght@0,200;0,300;0,400;0,500;0,600;0,700;1,200;1,300;1,400;1,500;1,600;1,700&family=Quicksand:wght@300;400;500;600;700&display=swap');
+
+// Color system
+$white:    #ffffff !default;
+$gray-100: #f8f9fa !default;
+$gray-200: #e9ecef !default;
+$gray-300: #dee2e6 !default;
+$gray-400: #ced4da !default;
+$gray-500: #adb5bd !default;
+$gray-600: #868e96 !default;
+$gray-700: #495057 !default;
+$gray-800: #373a3c !default;
+$gray-900: #212529 !default;
+$black:    #000000 !default;
+
+$blue:    #2780e3 !default;
+$indigo:  #6610f2 !default;
+$purple:  #170C3A !default;
+$pink:    #A52C60 !default;
+$red:     #CF4446 !default;
+$orange:  #EE6A24 !default;
+$light-orange: #FB9E07 !default;
+$yellow:  #F6D645 !default;
+$green:   #118230 !default;
+$teal:    #20c997 !default;
+$cyan:    #3093CF !default;
+
+// Theme colors
+$primary:   $pink !default;
+$secondary: $gray-700 !default;
+$success:   $green !default;
+$info:      $cyan !default;
+$warning:   $orange !default;
+$danger:    $red !default;
+$light:     $gray-400 !default;
+$dark:      $black !default;
+
+// Fonts
+$font-family-sans-serif: "KoHo" !default;
+$headings-font-family: "Quicksand" !default;
+$headings-font-weight: 700 !default;
+
+$navbar-font-family: "Quicksand" !default;
+$toc-font-family: "Quicksand" !default;
+$footer-font-family: "Quicksand" !default;
+
+$font-size-base: 1rem !default;
+
+// Body
+$body-color: $gray-900 !default;
+
+// Links
+$link-color: #2972A8 !default;
+$link-decoration: underline !default;
+$link-weight: bold !default;
+$link-hover-color: #207864 !default;
+$link-hover-decoration: underline !default;
+
+// Inline code
+$code-bg: $gray-200 !default;
+$code-color: $gray-900 !default;
+
+// Code copy button
+$btn-code-copy-color-active: #F8DF58 !default;
+
+// TOC
+$toc-color: $orange;
+$toc-font-size: 0.9em;
+
+// Navbar
+$navbar-bg: #1b2021 !default;
+$navbar-fg: $white !default;
+$navbar-hl: #F8DF58 !default;
+
+// Footer
+$footer-bg: $gray-900 !default;
+$footer-fg: $gray-300 !default;
+
+/*-- scss:rules --*/
+
+// Large screen heading size override
+@media (min-width: 1200px) {
+  h1, .h1 {
+    font-size: 1.3rem;
+  }
+}
+
+// General body smoothing
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+// Right-to-left language support
+.rtl {
+  direction: rtl;
+}
+
+
