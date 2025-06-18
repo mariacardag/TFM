@@ -1,4 +1,4 @@
- # Code Accompanying Master’s Thesis: *Sexist Rhetoric in the Spanish Congress: a Machine Learning-Based Approach*
+ # Code Accompanying Master’s Thesis - *Sexist Rhetoric in the Spanish Congress: a Machine Learning-Based Approach*
 
 > By Maria Carda 
 
