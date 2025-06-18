@@ -1,0 +1,2663 @@
+---
+title: "Code Accompanying Master’s Thesis"
+author: "Maria Carda"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: default 
+    css: style.scss
+---
+
+
+```{=html}
+<style>
+body {
+text-align: justify}
+</style>
+```
+
+## Introduction
+
+The objective of this project is to detect and analyze the presence of sexist discourse in Spanish parliamentary debates between 2019 and 2023, using a combination of automated data extraction, natural language processing, and neural network-based classification models. 
+
+In this markdown file, I present the code used to reach the analyses and conclusions summarised in the dissertation **“Sexist rhetoric in the Spanish Congress: a neural network based approach"**.
+
+The report is structured as follows. Section 1 outlines the automated web scraping process using Selenium, designed to retrieve complete records of legislative interventions. Section 2 details the data cleaning and enrichment procedures, including extraction of metadata. Section 3 explains the annotation of sexist discourse using OpenAI’s GPT-4o-mini API. Section 4 performs a descriptive analysis of the data. Section 5 covers model training, evaluation, and challenges, including data imbalance and contextual limitations. Finally, Sections 6 & 7 provide respectively the conclusions and limitations of this analysis. 
+
+
+
+### Load libraries
+
+To initiate the data analysis process, it is essential to configure a clean workspace and load the requisite R libraries. These include tools for data visualization and manipulation included in *tidyverse*.
+
+For text and web data extraction, *rvest* and *RSelenium* are employed. In section3, API interaction is facilitated through packages such as *httr*, *jsonlite*, and *openai*, the latter of which allows integration with OpenAI’s language models.
+
+Moreover, text preprocessing and natural language processing tasks are supported by *stringr*, *stringi*, *stopwords*, *udpipe*, and *tidytext*, which aid in linguistic parsing and text normalization. For statistical modeling and machine learning, libraries such as caret, *xgboost*, *randomForest*, and *nnet* provide a variety of algorithms, while *tidymodels*, along with extensions like recipes and *themis*, offer a unified and modular framework for model training and evaluation. 
+
+```{r, warning=FALSE, message=FALSE}
+
+rm(list = ls()) # remove old variables
+
+packages = c("RSelenium", "rvest", "magrittr", "tidyr", "magick", "scales", "tidyverse", "lubridate", "stringr", "stringi", "udpipe", "purrr", "tidytext", "stopwords", "openai", "readxl", "furrr", "data.table", "httr", "openai", "jsonlite", "nnet", "caret", "RColorBrewer", "ROSE", "forcats", "recipes", "tidymodels", "themis", "xgboost", "pROC", "randomForest")
+
+package.check <- lapply(packages,
+                        FUN = function(x){
+                          if (!require(x,character.only = TRUE)){
+                            install.packages(x,dependencies = TRUE)
+                            library(x, character.only = TRUE)
+                          }
+                        })
+
+```
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(123) # set seed for reproducibility 
+```
+
+Furthermore, a seed is set to ensure the reproducibility of the analysis.
+
+## 1. Data harvesting
+
+### 1.1 Scrapping the official transcripts of the plenary sessions
+
+The first step is to automate the scraping process using *Selenium* to efficiently extract the official transcripts of the plenary sessions of the Spanish Congress of Deputies during the XIV Legislature (2019 - 2023) from the [official Congress webpage](https://www.congreso.es/es/). 
+
+Hence, it is necessary to initialize the required remote driver and direct it to navigate the homepage of the Congress website (for detailed instructions regarding the setup of the Docker environment and the Selenium remote viewer, please refer to the accompanying **README file**).
+
+```{r}
+# initialize the remote driver
+rD <- rsDriver(browser = "firefox", geckover = "latest")
+remDr <- rD$client
+
+remDr <- remoteDriver(remoteServerAddr = "localhost", port = 4449, browserName = "firefox", version = "latest")
+remDr$open()
+
+# navigate congress webpage
+remDr$navigate("https://www.congreso.es/es/home")
+```
+
+Once the webpage is open, the cookies banner is shown at the bottom of the screen. They need to be accepted in order to continue navigating the webpage without any issues.
+
+```{r}
+aceptar <- remDr$findElement(using = "xpath", "//a[@title='Aceptar seleccionadas']")
+aceptar$clickElement()
+
+```
+
+After the cookies acceptance, the webpage is ready to navigate. Thus, the main navigation menu item labeled *“Información y Publicaciones”* (Information and Publications) is located using an XPath. The menu is expanded by executing a click on this element which is followed by a brief 2 seconds delay to allow the menu and sub-items to render fully before continuing.
+
+```{r}
+# find element "Información y Publicaciones"
+info_pub <- remDr$findElement(using = "xpath", "//a[contains(@class, 'dropdown-toggle') and .//div[contains(text(), 'Información y Publicaciones')]]")
+
+# expand menu
+remDr$executeScript("arguments[0].click();", list(info_pub))
+
+# 2 second delay to ensure the menu has been correctly loaded
+Sys.sleep(2) 
+```
+
+Then, the code finds the *“Índice de Publicaciones”* (Publications Index) submenu link within the expanded dropdown, using a CSS selector and clicks on it to navigate to the target page.
+
+```{r}
+# fin element "Índice de Publicaciones"
+index_pub <- remDr$findElement(using = "css selector", "#navigation > div.collapse.navbar-collapse.js-navbar-collapse > ul > li.item-4.dropdown.mega-dropdown.myhover-menu.show > ul > li:nth-child(2) > ul > li:nth-child(5) > a")
+
+# click on the link
+index_pub$clickElement()
+
+# 2 second delay to ensure the page has been correctly loaded
+Sys.sleep(2) 
+```
+
+In this part of the webpage, a dropdown menu for legislatures is identified by an HTML id attribute. JavaScript is used to set its value to "14" (the XIV legislature) which the time period selected for this study.
+
+```{r}
+# find the XIV legislature in the dropdown and select 
+select_legislatura <- remDr$findElement(using = "id", "_publicaciones_legislatura")
+
+remDr$executeScript("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('change'));", 
+                    list(select_legislatura, "14"))
+
+
+```
+
+Next, it locates the link containing *"Pleno y Diputacion Permanente"* (Plenary and Permanent Board).
+
+```{r}
+# find element "Pleno y Diputación Permanente"
+link_pleno <- remDr$findElement(using = "xpath", "//a[contains(@href, 'Pleno-y-Diputacion-Permanente')]")
+
+link_pleno$clickElement()
+
+```
+
+Finally before the scrapping process, an empty data frame named *textos* (texts) is created to store scraped data.
+
+```{r}
+# create empty dataframe to process data
+textos <- data.frame(Texto = character(), stringsAsFactors = FALSE)
+```
+
+Once the navigation is set at the webpage containing the official transcripts of the 2019-2023 legislature, the following code automates the extraction of the full transcripts documents - labeled *"Texto íntegro"* within table rows referencing plenary sessions *“Pleno”*. 
+
+However, since entering in each text opens a new window, it initiates by capturing the handle of the main browser window to allow consistent navigation between multiple windows. Then, a repeat loop systematically iterates over the displayed *"Texto íntegro"* links on each page and for each link found, a JavaScript click opens the linked content spawning a new browser tab. 
+
+The WebDriver switches focus to this new window and waits fo the content to load. Once the transcript is detected (*.textoIntegro.publicaciones*), the data is extracted and appended to the previously initialized dataframe. The script then closes the active tab, returns control to the main browser window, and briefly pauses before proceeding to the next link.
+
+
+```{r}
+
+ventana_principal <- remDr$getWindowHandles()[[1]]  
+
+repeat {  
+  # get all "Texto íntegro" links on current page
+  links <- remDr$findElements(using = "xpath", 
+                              value = "//tr[td[contains(text(),'Pleno')]]//a[text()='Texto íntegro']")
+
+  if (length(links) == 0) {
+    print("No se encontraron más enlaces en la página actual.")
+    break
+  }
+
+  # browse through each link on the current page
+  for (link in links) {
+    remDr$executeScript("arguments[0].click();", list(link))
+    Sys.sleep(2)
+
+    ventanas <- remDr$getWindowHandles()
+    nueva_ventana <- ventanas[[length(ventanas)]]
+    remDr$switchToWindow(nueva_ventana)
+
+    # wait for content to load
+    timeout <- 10
+    start_time <- Sys.time()
+    elemento <- NULL
+
+    repeat {
+      elemento <- tryCatch({
+        remDr$findElement(using = "css selector", ".textoIntegro.publicaciones")
+      }, error = function(e) NULL)
+
+      if (!is.null(elemento)) break
+
+      if (as.numeric(difftime(Sys.time(), start_time, units = "secs")) > timeout) {
+        warning("Tiempo de espera excedido, no se encontró el elemento.")
+        break
+      }
+
+      Sys.sleep(1)
+    }
+
+    if (!is.null(elemento)) {
+      texto <- elemento$getElementText()[[1]]
+      textos <- rbind(textos, data.frame(Texto = texto, stringsAsFactors = FALSE))
+    }
+
+    Sys.sleep(2)
+    remDr$executeScript("window.close();")
+    remDr$switchToWindow(ventana_principal)
+    Sys.sleep(1)
+  }
+
+  # save the identifier of the first “Pleno” before the change
+  id_pagina_anterior <- tryCatch({
+    remDr$findElement(using = "xpath", "(//tr[td[contains(text(),'Pleno')]])[1]")$getElementText()[[1]]
+  }, error = function(e) NA)
+
+  # find “>” next page button
+  siguiente_pagina <- tryCatch({
+    remDr$findElement(using = "xpath", "//li[@class='page-item']/a[@class='page-link btn_pag' and normalize-space(text())='>']")
+  }, error = function(e) NULL)
+
+  if (is.null(siguiente_pagina)) {
+    print("No hay más páginas disponibles.")
+    break
+  }
+
+  siguiente_pagina$clickElement()
+  print("Pasando a la siguiente página...")
+
+  # await change in content
+  timeout <- 10
+  start_time <- Sys.time()
+  cambio_detectado <- FALSE
+
+  repeat {
+    Sys.sleep(1)
+    cambio_detectado <- tryCatch({
+      nuevo_id <- remDr$findElement(using = "xpath", "(//tr[td[contains(text(),'Pleno')]])[1]")$getElementText()[[1]]
+      !is.na(id_pagina_anterior) && nuevo_id != id_pagina_anterior
+    }, error = function(e) FALSE)
+
+    if (cambio_detectado) break
+
+    if (as.numeric(difftime(Sys.time(), start_time, units = "secs")) > timeout) {
+      print("Fin alcanzado: la página no cambió tras hacer clic en '>'.")
+      break
+    }
+  }
+
+  if (!cambio_detectado) {
+    break
+  }
+}
+
+```
+
+To handle pagination, the script employs a dynamic check. It locates and clicks the "next page" button, identified via XPath targeting the *">"* pagination element. The script then waits for confirmation that the page has updated ensuring that the loop terminates when no further pages remain.
+
+Finally, Selenium is closed once the scrapping is complete. This step ensures maintaining a clean work environment and allocate properly the system resources. 
+
+```{r}
+# close selenium
+remDr$close()
+```
+
+
+### 1.2 Scrapping government officials
+
+Regarding the government officials, the official webpage of the Spanish government, [**La Moncloa**](https://www.lamoncloa.gob.es/gobierno/gobiernosporlegislaturas/Paginas/xiv_legislatura.aspx), is scrapped using *rvest* to extract the data for the 2019-2023 period.
+
+```{r}
+# set url to scrap
+url <- "https://www.lamoncloa.gob.es/gobierno/gobiernosporlegislaturas/Paginas/xiv_legislatura.aspx"
+
+# read url
+pagina <- read_html(url)
+
+# extract list elements corresponding to members of government
+ministros <- pagina %>%
+  html_nodes(xpath = '//*[@id="MainContent"]/ul/li') %>% 
+  html_text()  
+
+# save in a tibble
+ministros <- as_tibble(ministros)
+print(ministros)
+```
+
+However, as it can be observed, the data must be parsed into structured components to enable the analysis. First, the ministerial role (*cargo*) is separated from the full name (*nombre_completo*)* by identifying the comma delimiter. Then, names and surnames are isolated while accounting  for compound first names, such as "Carlos", "Jesús", "Luis", and "Manuel", which could be mistakenly interpreted as part of the surname. 
+
+Afterwards, the code removes common conjunctions (*"y"*) that may interfere with surname parsing. Finally, duplicate records are eliminated as the webpage contains repeated observations, and only the cleaned position (*cargo*), name (*nombre*), and surnames (*apellidos*) columns are retained.
+
+```{r}
+ministros <- ministros %>%
+  mutate(
+    # extract position after comma
+    cargo = str_extract(value, "^[^,]+"),
+    
+    # extract name after comma 
+    nombre_completo = str_trim(str_extract(value, "(?<=,)[^,]+$"))
+  ) %>%
+  mutate(
+    # eliminate everything after a dot
+    nombre_completo = str_remove(nombre_completo, "\\..*"),
+    # extract the first name
+    nombre = word(nombre_completo, 1),
+    # extract surname
+    apellidos_completos = str_remove(nombre_completo, paste0("^", nombre, " ")),
+    # adjust for composed names
+    apellidos = str_split(apellidos_completos, " ") %>% 
+      purrr::map_chr(~paste(.x, collapse = " ")),
+    nombre = if_else(
+      word(apellidos_completos, 1) %in% c("Carlos", "Jesús", "Luis", "Manuel"), 
+      paste(nombre, word(apellidos_completos, 1)),
+      nombre),
+    # replace surname if not correct
+    apellidos_completos = if_else(
+      word(apellidos_completos, 1) %in% c("Carlos", "Jesús", "Luis", "Manuel"),
+      str_remove(apellidos_completos, paste0("^", word(apellidos_completos, 1), " ")),
+      apellidos_completos),
+    apellidos_completos = str_remove(apellidos_completos, "(?i)\\sy\\s.*$"),
+    apellidos = str_split(apellidos_completos, " ") %>% 
+      purrr::map_chr(~paste(.x, collapse = " "))
+  ) %>%
+  # erase duplicates 
+  distinct(cargo, nombre, apellidos, .keep_all = TRUE) %>%
+  select(cargo, nombre, apellidos)
+
+
+print(ministros)
+```
+
+## 2. Data cleaning
+
+Once the data collection process is complete, the following step involves the preparation and cleaning of the dataset to ensure its analytical viability. Given that the official parliamentary transcripts include annotations that are not relevant to the study of sexist discourse, it is necessary standardize  formatting inconsistencies, correctly identify the content of each intervention and associate each one to its correspondent speaker, among other necessary steps.
+
+```{r}
+# execute this command if necessary
+# textos <- read_csv("textos_sample.csv")
+```
+
+
+### 2.1 Extract number and date of session
+
+To start processing the data, the date and number of session are extracted from each transcript. These elements are located in the initial portion of the document and can be systematically retrieved using the following regular expressions.
+
+```{r}
+# extract number of parliamentary session
+textos$numero_sesion <- as.numeric(str_extract(textos$Texto, "(?<=núm\\. )\\d+"))
+
+# extract date of parliamentary session
+textos$fecha <- str_extract(textos$Texto, "\\d{2}/\\d{2}/\\d{4}")
+
+head(textos)
+```
+
+Additionally, as the beginning of each transcript includes the session’s agenda and other formalities that are not part of the actual parliamentary debate, it is necessary to isolate the relevant content. This is achieved by defining the function *extraer_desde_segundo* which retrieves the discourse beginning from the second occurrence of the expressions *"Se abre la sesión"* or *"Se reanuda la sesión"*, which marks the start of parliamentary discourse. 
+
+```{r}
+extraer_desde_segundo <- function(texto) {
+  matches <- gregexpr("Se (abre|reanuda) la sesión| Señorías, se abre la sesión| Buenas tardes, señorías, se abre la sesión", texto)[[1]]
+  if (length(matches) >= 2 && matches[2] != -1) {
+    return(substring(texto, matches[2]))
+  } else {
+    return(NA)
+  }
+}
+
+textos$Texto_limpio <- sapply(textos$Texto, extraer_desde_segundo)
+
+```
+
+Finally, all parenthesis annotations are removed from the cleaned text. These contain non-essential information such as indications of applause or descriptions of interruptions.
+
+```{r}
+textos$Texto_limpio <- gsub("\\s*\\([^\\)]+\\)", "", textos$Texto_limpio)
+```
+
+### 2.2 Search for interventions
+
+The next step involves identifying individual parliamentary interventions. This is entails defining a regular expression pattern (*regex_orador*) that captures the typical introductory markers of a speaker’s turn, such as *"Señoría", "Señora", "El señor"*, or *"La señora"*. 
+
+```{r}
+# pattern for the beginning of the intervention
+regex_orador <- "(?=(Señor(?:ía)?|Señora|El señor|La señora)[^:\\n]*:)"
+
+# filter for pattern of interventions
+intervenciones <- textos %>%
+  mutate(fragmentos = str_split(Texto_limpio, regex_orador)) %>%
+  unnest(fragmentos) %>%
+  mutate(
+    fragmentos = str_squish(fragmentos),
+    interventor = str_extract(fragmentos, "^(Señor(?:ía)?|Señora|El señor|La señora)[^:\\n]*"),
+intervencion = str_remove(fragmentos, "^(Señor(?:ía)?|Señora|El señor|La señora)[^:\\n]*:?\\s*")) %>%
+  filter(!is.na(interventor), nchar(intervencion) > 100) %>%
+  select(fecha, numero_sesion, interventor, intervencion, Texto)
+
+```
+
+Each fragment is also processed to extract the name of the speaker (*interventor*) using string pattern matching. Interventions shorter than a specified character threshold (100 characters) are filtered out to exclude procedural or trivial utterances. 
+
+### 2.3 Load deputies
+
+Afterwards, the dataset containing the official data of the deputies of the 2019-2023 period is integrated (obtained from the official repository of the Spanish Congress, see: [Spanish Congress Public Repository](https://www.congreso.es/es/opendata/diputados)) 
+
+Initially, the *NOMBRE* (name) column contains both surnames and names, therefore, it is split into separate variables (*APELLIDOS* and *NOMBRE*, respectively) by using a comma-space delimiter. The resulting components are then standardized to lowercase and trimmed of extraneous whitespace to ensure consistency.
+
+
+```{r, show_col_types}
+diputados <- read_delim("diputados.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE, show_col_types = FALSE)
+
+diputados <- diputados %>%
+  separate(NOMBRE, into = c("APELLIDOS", "NOMBRE"), sep = ",\\s*", remove = FALSE) %>%
+  mutate(
+    APELLIDOS = str_to_lower(str_trim(APELLIDOS)),
+    NOMBRE = str_to_lower(str_trim(NOMBRE))
+  )
+
+head(diputados)
+
+```
+
+Given that some members changed parliamentary groups over the course of the legislature, the dataset is deduplicated based on surnames and electoral formation/political party (*FORMACIONELECTORAL*), retaining only unique combinations. 
+
+```{r}
+# account for parliamentary group change
+diputados <- diputados %>%
+  distinct(APELLIDOS, FORMACIONELECTORAL, .keep_all = TRUE)
+```
+
+
+Moreover, a manual correction applied to the specific case of *"olano vela"* whose correct surname is *"de olano vela"* in order to maintain alignment with naming conventions used in the transcripts. 
+
+```{r}
+# specific case correction
+diputados$APELLIDOS <- ifelse(diputados$APELLIDOS == "olano vela", 
+                              paste("de", diputados$APELLIDOS), 
+                              diputados$APELLIDOS)
+```
+
+
+### 2.4 Valid interventors identification
+
+To improve the reliability of speaker attribution within the parliamentary transcripts, this segment implements a multi-step normalization and validation procedure for identifying legitimate speakers (interventores).
+
+#### 2.4.1 Surname standarization
+
+First, the surnames (*APELLIDOS*) of members of parliament (*diputados*) and ministers (*ministros*) are standardized through a normalization process to facilitate reliable matching of speaker names across datasets and textual sources. Hence, all characters are converted to lowercase and diacritical marks are eliminated. Additionally, the position (*cargo*) is similarly normalized.
+
+
+```{r}
+# standarization
+diputados$APELLIDOS <- diputados$APELLIDOS %>%
+  stri_trans_general("Latin-ASCII") %>%
+  tolower()
+
+ministros$apellidos <- ministros$apellidos %>%
+  stri_trans_general("Latin-ASCII") %>%
+  tolower()
+
+ministros$cargo <- ministros$cargo %>%
+  stri_trans_general("Latin-ASCII") %>%
+  tolower()
+
+# unification of all surnames and pattern creation
+todos_apellidos <- unique(c(diputados$APELLIDOS, ministros$apellidos, ministros$cargo))
+
+patron_apellidos <- paste0("\\b(", paste(todos_apellidos, collapse = "|"), ")\\b")
+```
+
+After standardization, a unified list of unique surnames and positions is compiled which is used to construct a regular expression pattern (*patron_apellidos*) that matches any of the surnames as whole words. 
+
+#### 2.4.2 Presidents identification
+
+Then, the script detects whether the speaker label contains the word *PRESIDENTE* or *PRESIDENTA* (president) in uppercase. The interventor field is then normalized by removing diacritics and converting all characters to lowercase, except for the word PRESIDENTE/A, which is re-capitalized when appropriate to preserve its salience.
+
+
+```{r}
+# detect if PRESIDENT is in upper case
+intervenciones <- intervenciones %>%
+  mutate(
+    es_presidencia_mayus = str_detect(interventor, "\\bPRESIDENT[AE]\\b"))
+
+# normalize text 
+intervenciones <- intervenciones %>%
+  mutate(
+    interventor = interventor %>%
+      stri_trans_general("Latin-ASCII") %>%
+      tolower())
+
+# upper case PRESIDENT 
+intervenciones <- intervenciones %>%
+  mutate(
+    interventor = if_else(
+      es_presidencia_mayus,
+      str_replace(interventor, "\\bpresident[ae]\\b", toupper(str_extract(interventor, "\\bpresident[ae]\\b"))),
+      interventor))
+
+```
+
+
+#### 2.4.3 Valid interventor
+
+Subsequently, a speaker is considered valid if their name matches a known surname from the previously standardized list (*patron_apellidos*), or if the term PRESIDENTE/A appears. Interventions lacking valid attribution are assumed to be continuations of the preceding speaker’s statement; these are merged accordingly to propagate the most recent valid speaker.
+
+```{r}
+# detect if interventor is valid by patron_apellidos or president in uppercase
+intervenciones <- intervenciones %>%
+  mutate(
+    valido = str_detect(interventor, patron_apellidos) |
+             str_detect(interventor, "\\bPRESIDENT[AE]\\b")
+  )
+
+# clean non-valid interventors by joining to previous intervention
+intervenciones <- intervenciones %>%
+  mutate(
+    valido = coalesce(valido, FALSE),
+    intervencion = if_else(!valido, paste(lag(intervencion, default = ""), intervencion), intervencion),
+    intervencion = if_else(!valido, NA_character_, intervencion),
+    interventor = if_else(!valido, NA_character_, interventor),
+    valido = if_else(!valido, NA, valido)
+  ) %>%
+  fill(intervencion, .direction = "down") %>%
+  filter(!is.na(valido)) %>%
+  select(-valido)
+```
+
+However, a final refinement step is necessary as the *interventor* still contains misattributed speaker labels. Therefore, the following code checks whether the text begins with standard parliamentary honorifics and simultaneously ensures it does not contain  verbs, pronouns, or punctuation that might indicate it is part of a sentence rather than a proper name. 
+
+If a segment fails this validation, it is again merged with the preceding valid intervention. 
+
+```{r}
+# determine valid and invalid patterns
+patron_valido <- "^\\b(el|la)\\s+senor(a)?\\b"
+patron_invalido <- "\\b(ha|dice|dijo|dicho|usted|tienen|escuche|dato|repetir|ecuchaba|intervengo|tengo|empezar|clave|pregunta|le|ya|tom[oó]|afirma|es|est[aá]|se|repase|retumba)\\b|[,;:]"
+
+intervenciones <- intervenciones %>%
+  mutate(
+    interv_lower = str_to_lower(interventor),
+    # valid if it starts correctly and does NOT contain verbs or suspicious punctuation.
+    es_valido = str_detect(interv_lower, patron_valido) & !str_detect(interv_lower, patron_invalido)
+  ) %>%
+  mutate(
+    intervencion = if_else(!es_valido, paste(lag(intervencion, default = ""), intervencion), intervencion),
+    interventor = if_else(!es_valido, NA_character_, interventor)
+  ) %>%
+  fill(intervencion, .direction = "down") %>%
+  filter(!is.na(interventor)) %>%
+  select(-es_valido, -interv_lower, -es_presidencia_mayus)
+
+```
+
+#### 2.4.4 Cleaning interventors
+
+To continue, consistent labels need to be attributed across the parliamentary interventions.
+
+First, honorific treatment (*el señor, la señora*) is extracted from each speaker label to be stored in the variable *tratamiento*. The remaining portion of the interventor string is trimmed and converted to lowercase to facilitate uniform comparison and mapping.
+
+Second, the script replaces vague institutional titles - such as presidenta, vicepresidenta segunda del gobierno, or ministro de sanidad - with the corresponding individual's surname. These mappings are determined conditionally based on the date of the session, since ministerial appointments and government compositions change over time. For instance, references to the *Ministra de Educación y Formación Profesional* are assigned to either Celaá Diéguez or Alegría Continente depending on whether the session occurred before or after July 12, 2021.
+
+
+```{r}
+intervenciones <- intervenciones %>%
+  mutate(
+    tratamiento = str_extract(interventor, "^\\b(el|la)\\s+senor(a)?\\b"),
+    tratamiento = str_to_lower(tratamiento), 
+    interventor = str_remove(interventor, "^\\b(el|la)\\s+senor(a)?\\s+"),
+    interventor = str_trim(interventor),
+    interventor = str_to_lower(interventor)
+  ) %>%
+  mutate(
+    interventor = case_when(interventor == "presidenta" ~ "batet lamana",
+      interventor == "presidente" ~ "gomes de celis",
+      interventor == "presidente de gobierno" ~ "sanchez perez-castejon",
+      interventor == "ministra de politica territorial y portavoz del gobierno" ~ "rodriguez garcia",
+      interventor == "vicepresidenta segunda del gobierno y ministra de trabajo y economia social" ~ "diaz perez",
+      interventor == "vicepresidenta tercera del gobierno y ministra de trabajo y economia social" ~ "diaz perez",
+      interventor == "presidenta del congreso de los diputados" ~ "batet lamana",
+      interventor== "presidente de la mesa de edad" ~ "zamarron moreno",
+      interventor == "candidato a PRESIDENTE del gobierno" ~ "abascal conde",
+      str_detect(interventor, "ministra de educacion y formacion profesional") & fecha < as.Date("2021-07-12") ~ "celaa dieguez",
+      str_detect(interventor, "ministra de educacion y formacion profesional") & fecha >= as.Date("2021-07-12") ~ "alegria continente",
+
+      str_detect(interventor, "ministro de cultura y deporte") & fecha < as.Date("2021-07-12") ~ "rodriguez uribes",
+      str_detect(interventor, "ministro de cultura y deporte") & fecha >= as.Date("2021-07-12") ~ "iceta llorens",
+
+      str_detect(interventor, "ministro de sanidad") & fecha < as.Date("2021-01-27") ~ "illa roca",
+      str_detect(interventor, "ministro de sanidad") & fecha >= as.Date("2021-01-27") ~ "minones conde",
+
+      str_detect(interventor, "ministro de universidades") & fecha < as.Date("2021-12-20") ~ "castells olivan",
+      str_detect(interventor, "ministro de universidades") & fecha >= as.Date("2021-12-20") ~ "subirats humet",
+      TRUE ~ interventor
+    )
+  )
+
+```
+
+Finally, to resolve any remaining ambiguous cases, the data is merged with the previous ministerial dataset (*ministros*), linking formal titles to surnames. If a match is found, the surname (apellidos) from the external source replaces the existing interventor entry. 
+
+
+```{r}
+intervenciones <- intervenciones %>%
+  left_join(ministros %>% select(cargo, apellidos), by = c("interventor" = "cargo")) %>%
+  mutate(
+    interventor = ifelse(!is.na(apellidos), apellidos, interventor)  
+  ) %>%
+  select(-apellidos)  
+
+```
+
+### 2.5 Extraction of page and agenda
+
+#### 2.5.1 Function definition
+
+The function *extraer_orden_dia* is designed to extract the agenda section of the transcript, by using a regular expression to locate and extract the substring that begins with *“ORDEN DEL DÍA:”* and ends with *“SUMARIO”*.
+
+```{r}
+extraer_orden_dia <- function(texto) {
+  orden <- stringr::str_extract(texto, "ORDEN DEL DÍA:([\\s\\S]*?)SUMARIO")
+  if (is.na(orden)) return(NA_character_)
+  return(orden)}
+
+```
+
+However, it is necessary to design another function (*extraer_orden_dia_excepcion*) for session 273 which does not comply with the previously designed pattern. In this case, the function locates the phrase *“Se abre la sesión”* and searches for a second occurrence of the same phrase, which mark the begging of the document and the beggining of the transcript, respectevily. Thus, between both occurences of the phrase the agenda is contained.
+
+```{r}
+extraer_orden_dia_excepcion <- function(texto) {
+  primera_aparicion <- stringr::str_locate(texto, "Se abre la sesión")[1, 1]
+  if (is.na(primera_aparicion)) return(NA_character_)
+  
+  restante <- substr(texto, primera_aparicion + 1, nchar(texto))
+  segunda_aparicion <- stringr::str_locate(restante, "Se abre la sesión")[1, 1]
+  if (is.na(segunda_aparicion)) return(NA_character_)
+  
+  final <- primera_aparicion + segunda_aparicion + nchar("Se abre la sesión") - 1
+  inicio <- stringr::str_locate(texto, "ORDEN DEL DÍA:")[1, 1]
+  if (is.na(inicio)) return(NA_character_)
+  
+  orden <- substr(texto, inicio, final)
+  return(orden)
+}
+```
+
+Once the previous functions are applied, the retrieved agenda needs to be processed with *procesar_orden_dia*.
+It systematically removes HTML artifacts and unwanted phrases such as pagination markers (*"(Página 12)"*) and standard headers. It then segments the cleaned text based on page markers and associates each agenda item with its corresponding page number. The output is a tidy tibble with two columns: one for the agenda point (*punto_dia*) and another for the page number (*pagina*), facilitating structured analysis of the agenda.
+
+```{r}
+procesar_orden_dia <- function(texto) {
+  texto <- gsub("href='#\\(Página\\d+\\)'?>\\(Página\\d+\\)", "", texto)
+  texto <- gsub("href='#\\(Página\\d+\\)'?>?", "", texto)
+  texto_limpio <- gsub("ORDEN DEL DÍA:?|Página \\d+ SUMARIO", "", texto, ignore.case = TRUE)
+  texto_limpio <- gsub("\\((?!Página)[^\\)]*\\)", "", texto_limpio, perl = TRUE)
+  
+  paginas <- str_extract_all(texto_limpio, "\\(Página\\d+\\)")[[1]]
+  if (length(paginas) == 0) {
+    return(tibble(punto_dia = texto_limpio, pagina = NA_integer_))
+  }
+  
+  paginas_num <- as.integer(str_extract(paginas, "\\d+"))
+  partes <- str_split(texto_limpio, "\\(Página\\d+\\)")[[1]] %>% str_trim()
+  partes <- partes[partes != "" & partes != "'>"]
+  
+  n <- min(length(partes), length(paginas_num))
+  
+  tibble(
+    punto_dia = partes[1:n],
+    pagina = paginas_num[1:n]
+  )}
+```
+
+Complementarily, the function *buscar_pagina_aproximada*  attempts to identify the page number of a given intervention within the transcript of the session. It first checks for any explicit mention of a page number in the intervention and if it is not found, the function searches for the location of the intervention text within the full document and determines the closest preceding page marker. If no direct match is possible, the function performs a word overlap comparison across page segments to estimate the most likely page, returning the best approximation available.
+
+```{r}
+buscar_pagina_aproximada <- function(texto, intervencion) {
+  # extract pages
+  paginas <- stringr::str_extract_all(texto, "\\(Página\\s*\\d+\\)|Página\\s*\\d+")[[1]]
+  pos_paginas <- stringr::str_locate_all(texto, "\\(Página\\s*\\d+\\)|Página\\s*\\d+")[[1]][, "start"]
+  nums_paginas <- as.integer(stringr::str_extract(paginas, "\\d+"))
+  
+  if (length(pos_paginas) == 0) return(NA_integer_)
+  
+  # check explicit mention of pagination
+  pagina_explicita <- stringr::str_extract(intervencion, "Página\\s*(\\d+)")
+  if (!is.na(pagina_explicita)) {
+    numero_pag <- as.integer(stringr::str_extract(pagina_explicita, "\\d+"))
+    if (numero_pag %in% nums_paginas) {
+      return(numero_pag)
+    }
+  }
+  
+  intervencion_limpia <- stringr::str_remove_all(intervencion, "Página\\s*\\d+")
+  fragmento <- stringr::str_sub(intervencion_limpia, 1, 200)
+  fragmento <- stringr::str_replace_all(fragmento, "\\s+", " ")
+  fragmento <- stringr::str_trim(fragmento)
+  
+  if (stringr::str_length(fragmento) == 0) return(NA_integer_)
+  
+  ubicacion <- stringr::str_locate(texto, stringr::fixed(fragmento, ignore_case = TRUE))[1, "start"]
+  
+  if (is.na(ubicacion)) {
+    palabras <- stringr::str_split(fragmento, " ", simplify = TRUE)
+    if (length(palabras) >= 5) {
+      palabras_seguras <- stringr::str_replace_all(palabras[1:5], "([\\.^$|()\\[\\]{}*+?\\\\])", "\\\\\\1")
+      pattern <- paste0(palabras_seguras, collapse = ".*?")
+      ubicacion <- stringr::str_locate(texto, stringr::regex(pattern, ignore_case = TRUE))[1, "start"]
+    }
+  }
+  
+  if (is.na(ubicacion)) {
+    pos_paginas_ext <- c(pos_paginas, nchar(texto) + 1)
+    mejor_pagina <- NA_integer_
+    mejor_coincidencia <- -1
+    
+    palabras_intervencion <- unique(tolower(stringr::str_split(fragmento, "\\s+", simplify = TRUE)))
+    
+    for (i in seq_along(nums_paginas)) {
+      inicio <- pos_paginas_ext[i]
+      fin <- pos_paginas_ext[i + 1] - 1
+      fragmento_texto <- tolower(stringr::str_sub(texto, inicio, fin))
+      palabras_fragmento <- unique(stringr::str_split(fragmento_texto, "\\s+", simplify = TRUE))
+      
+      coincidencias <- sum(palabras_intervencion %in% palabras_fragmento)
+      
+      if (coincidencias > mejor_coincidencia) {
+        mejor_coincidencia <- coincidencias
+        mejor_pagina <- nums_paginas[i]
+      }
+    }
+    
+    return(mejor_pagina)
+  }
+  
+  prev_paginas <- which(pos_paginas <= ubicacion)
+  if (length(prev_paginas) == 0) {
+    next_paginas <- which(pos_paginas > ubicacion)
+    if (length(next_paginas) == 0) return(NA_integer_)
+    return(nums_paginas[min(next_paginas)])
+  }
+  
+  return(nums_paginas[max(prev_paginas)])
+}
+```
+
+
+#### 2.5.2 Agenda extraction
+
+In the first step, the agenda is extracted from full transcripts using extraction functions defined in section 2.5.1. The raw HTML and metadata artifacts (e.g., pagination tags) are removed, and the cleaned agenda items are parsed and structured using procesar_orden_dia. Each item is then assigned a unique identifier and expanded into a tabular format. 
+
+In the second phase, advanced text cleaning is applied to the agenda items to normalize formatting, remove extraneous phrases (such as “Página 12” or “Exclusión del…”), and split compound items using delimiter patterns. Filtering is then applied to exclude non-substantive entries (e.g., procedural notes or generic headings).
+
+The third phase maps each intervention to its approximate page number using the *buscar_pagina_aproximada* function, and agenda items are assigned page ranges to delineate their textual span within the session document. These ranges are determined by the start and end pages of each agenda item. Finally, the data is converted into data.table format to enable a non-equi join, aligning each intervention with the corresponding agenda item based on session number and inferred page range. 
+
+```{r}
+# step 1: extract & process agenda
+textos <- textos %>%
+  rowwise() %>%
+  mutate(orden_del_dia = if (numero_sesion == 273) {
+    extraer_orden_dia_excepcion(Texto)
+  } else {
+    extraer_orden_dia(Texto)
+  }) %>%
+  ungroup() %>%
+  mutate(orden_del_dia = stringr::str_remove_all(orden_del_dia, "href='#\\(Página\\d+\\)'?>")) %>%
+  mutate(id_fila = dplyr::row_number(),
+         orden_expandido = purrr::map(orden_del_dia, procesar_orden_dia)) %>%
+  tidyr::unnest(orden_expandido, names_sep = "_") %>%
+  select(-id_fila)
+
+# step 2: clean resulting text
+textos <- textos %>%
+  mutate(
+    punto_dia_limpio = orden_expandido_punto_dia %>%
+      stringr::str_remove_all("Página\\s*\\d+\\s*-*\\s*") %>%
+      stringr::str_remove_all("Exclusión del\\s*-*\\s*") %>%
+      stringr::str_remove_all(".*?:\\s*-\\s*") %>%
+      stringr::str_replace_all("\\.\\s*\\.\\.+", ".") %>%
+      stringr::str_replace_all("\\n?\\s*-\\s+", "|||") %>%
+      stringr::str_replace_all("\\s+", " ") %>%
+      stringr::str_trim()) %>%
+  tidyr::separate_rows(punto_dia_limpio, sep = "\\|\\|\\|") %>%
+  mutate(punto_dia_limpio = stringr::str_trim(punto_dia_limpio)) %>%
+  mutate(punto_dia_limpio = stringr::str_remove(punto_dia_limpio, "\\.+$")) %>%
+  filter(punto_dia_limpio != "") %>%
+  filter(
+    !stringr::str_detect(stringr::str_to_lower(punto_dia_limpio), "^minuto de silencio"),
+    !stringr::str_detect(stringr::str_to_lower(punto_dia_limpio), "^modificación del"),
+    !stringr::str_detect(stringr::str_to_lower(punto_dia_limpio), "^modificación de la"),
+    !stringr::str_detect(stringr::str_to_lower(punto_dia_limpio), "^exclusión del"),
+    !stringr::str_detect(stringr::str_to_lower(punto_dia_limpio), "^orden día")
+  )
+
+# step 3: find interventions pages
+intervenciones <- intervenciones %>%
+  mutate(pagina = purrr::map2_int(Texto, intervencion, buscar_pagina_aproximada))
+
+textos <- textos %>%
+  mutate(pagina = as.integer(orden_expandido_pagina)) %>%
+  arrange(numero_sesion, pagina) %>%
+  group_by(numero_sesion) %>%
+  mutate(
+    pagina_inicio = pagina,
+    pagina_fin = dplyr::lead(pagina) - 1
+  ) %>%
+  ungroup() %>%
+  mutate(pagina_fin = ifelse(is.na(pagina_fin), Inf, pagina_fin))
+
+# convert to data.table
+textos_dt <- as.data.table(textos)
+intervenciones_dt <- as.data.table(intervenciones)
+
+# join
+textos_reducido <- textos_dt[, .(numero_sesion, pagina_inicio, pagina_fin, punto_dia = punto_dia_limpio)]
+
+intervenciones <- textos_reducido[
+  intervenciones_dt,
+  on = .(numero_sesion, pagina_inicio <= pagina, pagina_fin >= pagina),
+  nomatch = NA]
+
+```
+
+#### 2.5.3 Missing values
+
+However, the results show that there are still some observations with the no agenda assigned.
+
+```{r}
+intervenciones %>%
+  filter(is.na(punto_dia)) %>%
+  head() %>% 
+  select(-c(intervencion, Texto)) # to avoid displaying long strings of text
+```
+
+To address the presence of missing values, each intervention is first assigned a unique identifier using the sequential row number. 
+
+```{r}
+intervenciones <- intervenciones %>%
+  mutate(id_intervencion = row_number())
+
+```
+
+Then, each parliamentary intervention is appropriately associated with a corresponding agenda item (*"punto del día"*), even when explicit matches are initially missing. To do so, the intervenciones dataset is converted to a data.table object for efficient manipulation and data is ordered by *id_intervencion* to preserve the chronological sequence of interventions within each session.
+
+To address missing agenda labels, the *zoo::na.locf()* function is applied twice within each session number (*numero_sesion*) group; fiest, first, propagating the last known *punto_dia* value forward to fill NAs, and then repeating the process in reverse (fromLast = TRUE) to catch any remaining gaps by carrying values backward.
+
+```{r}
+intervenciones<- as.data.table(intervenciones)
+ 
+setorder(intervenciones, id_intervencion)
+
+intervenciones[, punto_dia := zoo::na.locf(punto_dia, na.rm = FALSE), by = numero_sesion]
+
+intervenciones[, punto_dia := zoo::na.locf(punto_dia, fromLast = TRUE, na.rm = FALSE), by = numero_sesion]
+ 
+```
+
+This bidirectional fill ensures that every intervention is linked to the most plausible agenda item, preserving contextual continuity in cases where agenda associations are sparsely or inconsistently marked.
+
+```{r}
+intervenciones <- as_tibble(intervenciones)
+
+intervenciones %>%
+  filter(is.na(punto_dia)) %>%
+  head()
+```
+
+### 2.6 Final adjustments
+
+After the data has been structured and aligned, final preprocessing steps are applied to ensure textual consistency and remove non-informative characters. Specifically, newline and carriage return charactersare removed from the *Texto*, *intervencion*, and *punto_dia*.
+
+```{r}
+intervenciones <- intervenciones %>% 
+     mutate(
+         Texto = Texto %>%
+             str_replace_all("[\r\n]+", " "),
+         intervencion = intervencion %>%
+             str_replace_all("[\r\n]+", " "),
+         punto_dia = punto_dia %>%
+             str_replace_all("[\r\n]+", " ")
+    )
+```
+
+Additionally, parenthetical and bracketed expressions, which typically contain stage directions, speaker clarifications or pagination are removed from the *intervencion*.
+
+```{r}
+intervenciones$intervencion <- gsub("\\s*\\([^\\)]+\\)|\\[.*?\\)", "", intervenciones$intervencion)
+
+```
+
+
+#### 2.6.1 Join formacion electoral
+
+To conclude, the dataset is enriched with relevant speaker metadata, the intervention records are merged with the previous dataset of legislators (*diputados*), obtained from the official repository of the Spanish Congress. 
+
+The merge operation appends party affiliation (*FORMACIONELECTORAL*), electoral district (*CIRCUNSCRIPCION*), and first name (*NOMBRE*) to each intervention. In the absence of data on the date of changes of parliamentary groups among deputies, only a combination of surnames and electoral formation is maintained for the analysis.
+
+To address ambiguities, such as the case of López Álvarez, shared by both a male and a female legislator, the code uses the honorific treatment (*tratamiento*) to disambiguate identities and assign the appropriate first name and party affiliation. Remaining unmatched records are defaulted to *"GOB"* (government) as a position, ensuring completeness of the dataset.
+
+```{r}
+intervenciones <- intervenciones %>%
+  left_join(
+    diputados %>%
+      select(APELLIDOS, FORMACIONELECTORAL, CIRCUNSCRIPCION, NOMBRE) %>%
+      distinct(APELLIDOS, .keep_all = TRUE),  # ensure last name is unique
+    by = c("interventor" = "APELLIDOS")
+  ) %>%
+  # correction: debugging the López Álvarez case
+  mutate(
+    NOMBRE = case_when(
+      interventor == "lopez alvarez" & tratamiento == "el senor" ~ "patxi",
+      interventor == "lopez alvarez" & tratamiento == "la senora" ~ "maría teresa",
+      TRUE ~ NOMBRE
+    ),
+    FORMACIONELECTORAL = case_when(
+      interventor == "lopez alvarez" & tratamiento == "el senor" ~ 
+        diputados$FORMACIONELECTORAL[diputados$NOMBRE == "patxi" & diputados$APELLIDOS == "lopez alvarez"],
+      interventor == "lopez alvarez" & tratamiento == "la senora" ~ 
+        diputados$FORMACIONELECTORAL[diputados$NOMBRE == "maría teresa" & diputados$APELLIDOS == "lopez alvarez"],
+      TRUE ~ FORMACIONELECTORAL),
+    FORMACIONELECTORAL = coalesce(FORMACIONELECTORAL, "GOB")) 
+
+```
+
+#### 2.6.2 Género
+
+Lastly, the proxy gender variable (*genero*) is created from the honorific treatment (*tratamiento*) preceding each speaker's name. The script classifies the speaker as either "man" (hombre) or "woman" (mujer) based on whether the phrase begins with *el señor* or *la señora*, respectively. This binary classification, while limited in scope, enables gender-based analysis of discourse patterns within parliamentary debate. 
+
+```{r}
+intervenciones <- intervenciones %>%
+    mutate(
+        tratamiento = case_when(
+            str_detect(str_to_lower(tratamiento), "el senor") ~ "hombre",
+            str_detect(str_to_lower(tratamiento), "la senora") ~ "mujer",
+            TRUE ~ NA_character_)
+    ) %>% dplyr::rename(genero = tratamiento)
+
+```
+
+Therefore, the final dataset *intervenciones* is ready for annotation. It contains 30,924 observations for 13 variables - including: **speaker** (*interventor*), **intervention** (*intervencion*), **gender** (*genero*), **constituency** (*CIRCUNSCRIPCION*), **political affiliation** (*FORMACIONELECTORAL*) and **agenda** (*punto_dia*).
+
+```{r}
+head(intervenciones)
+```
+
+
+
+## 3. Data annotation
+
+After the data is prepared, it is necessary to detect whether the interventions have sexist comments or not. Due to time and resources constraints, the annotation process is performed using OpenAI’s API, specifically the *gpt-4o-mini model*.
+
+For this part, it is necessary to obtain an API key in OpenAI's webpage (see: https://openai.com/api/) and buy approximately $10 of credit to perform the following analysis. 
+
+Once the API key is obtained, it is stored in *mi_api_key*.
+
+```{r, eval=FALSE}
+# set your unique API
+mi_api_key <- "sk-INSERT-YOUR-API"
+```
+
+The following function, *procesar_batch*, is created to systematically analyze the observations within the dataset. It is designed to detect instances of sexist discourse directed at other members of the chamber based on the following pre-specified prompt - *disclaimer*: the prompt was optimized as much as possible to avoid exceeding the available credit, insufficient resources prevented it from being sufficiently tested prior to execution.
+
+The prompt provided to the API is grounded in **Ilie’s (2018) theory of master suppression techniques**, which outlines five primary strategies through which women are systematically marginalized and disempowered within institutional settings. These include: (1) **Making invisible**, where individuals are ignored or sidelined to diminish their political and social presence; (2) **Ridiculing**, which entails mocking or belittling, often through gendered language or dismissive tone; (3) **Withholding information**, by excluding individuals from key knowledge or processes; (4) **Double binding**, referring to situations where women are criticized regardless of their actions, thereby restricting their agency; and (5) **Blaming and shaming**, where responsibility is unjustly shifted onto individuals for structural or contextual issues. However, the category *withholding information* was excluded from the analysis due to the difficulty to properly measure it in parliamentary discourse.
+
+Hence, OpenAI's API processes and completes the dataset with three fields: whether misogyny was detected (*misoginia*), the misogynistic fragment (if applicable, it is stored in *fragmento_misogino*), and the corresponding type of discourse observed (*categoria*). 
+
+```{r, eval=FALSE}
+procesar_batch <- function(df, start_idx, end_idx, openai_api_key, model = "gpt-4o-mini") {
+  for (i in start_idx:end_idx) {
+    texto_a_analizar <- df$intervencion[i]
+
+   prompt <- paste0(
+  "Analiza el siguiente texto y detecta posibles casos de sexismo o misoginia dirigidos explícitamente a otras personas de la cámara (diputadas, senadoras, representantes)",
+  "No consideres referencias neutrales o formales que solo mencionen género sin intención peyorativa.",
+  "Evalúa si se da alguno de los siguientes tipos:",
+  "1. **Ignorar/Hacer Invisible**: Tratar a una mujer como irrelevante u omitir su participación.",
+  "2. **Ridiculizar**: Burlas, comparaciones ofensivas o tono despectivo hacia una parlamentaria.",
+  "3. **Doble Vinculación**: Críticas contradictorias donde cualquier acción de una mujer es malinterpretada.",
+  "4. **Culpar y Avergonzar**: Culpar a una mujer por problemas estructurales o por su condición.",
+  "Responde estrictamente con este formato:\n",
+  "¿Detectado?: Sí/No\n",
+  "Fragmento misógino (si aplica): ...\n",
+  "Tipo: ...\n\n",
+  "TEXTO: ", texto_a_analizar
+    )
+
+    intentos <- 0
+    max_intentos <- 5
+    respuesta <- NULL
+
+    while (intentos < max_intentos && is.null(respuesta)) {
+      intentos <- intentos + 1
+      Sys.sleep(5)
+
+      res <- tryCatch({
+        POST(
+          url = "https://api.openai.com/v1/chat/completions",
+          add_headers(
+            Authorization = paste("Bearer", openai_api_key),
+            `Content-Type` = "application/json"
+          ),
+         body = jsonlite::toJSON(list(
+  model = model,
+  messages = list(
+    list(role = "system", content = "Eres un asistente experto en análisis de discurso sexista."),
+    list(role = "user", content = prompt)
+  ),
+  temperature = 0.2
+), auto_unbox = TRUE)
+
+        )
+      }, error = function(e) {
+        cat(paste("Error en intento", intentos, "fila", i, ":", e$message, "\n"))
+        return(NULL)
+      })
+
+      if (!is.null(res) && status_code(res) == 200) {
+  respuesta_json <- content(res, as = "parsed")
+  respuesta <- respuesta_json$choices[[1]]$message$content
+} else {
+
+  cat(paste("Intento", intentos, "fallido en fila", i, "\n"))
+  cat("Código de estado:", status_code(res), "\n")
+  print(content(res, as = "text"))
+}
+
+    }
+
+    if (is.null(respuesta)) {
+      df$misoginia[i] <- "Error API"
+      df$categoria[i] <- "Límite excedido"
+      df$fragmento_misogino[i] <- "Sin resultado"
+    } else {
+      cat("Fila", i, "- respuesta API:\n", respuesta, "\n\n")
+
+      detectado <- ifelse(grepl("¿Detectado\\?:\\s*Sí", respuesta, ignore.case = TRUE), "Sí", "No")
+      df$misoginia[i] <- detectado
+
+      if (detectado == "Sí") {
+        texto_limpio <- sub("\\*\\*(Nota|Explicación):.*", "", respuesta)
+        fragmento <- sub('.*Fragmento misógino \\(si aplica\\):\\s*["“]?(.*?)["”]?\\s*(Tipo:|\\*\\*Tipo:\\*\\*).*', '\\1', texto_limpio, perl = TRUE)
+        tipo <- sub('.*(Tipo:|\\*\\*Tipo:\\*\\*)\\s*(.*?)\\s*$', '\\2', texto_limpio, perl = TRUE)
+
+        df$fragmento_misogino[i] <- fragmento
+        df$categoria[i] <- tipo
+      } else {
+        df$fragmento_misogino[i] <- "N/A"
+        df$categoria[i] <- "Ninguna"
+      }
+    }
+  }
+
+  return(df)
+}
+
+```
+
+Before applying the function, it is necessary to create the necessary variables in the existing data frame.
+
+```{r}
+intervenciones$misoginia <- NA
+intervenciones$fragmento_misogino <- NA
+intervenciones$categoria <- NA
+
+```
+
+The, the function can be applied in batches or to the entire dataset, and the results can be subsequently exported to a *.csv* file for easier analysis.
+
+```{r, eval=FALSE}
+completado <- procesar_batch(intervenciones, start_idx = 1, end_idx = 30924, openai_api_key = mi_api_key)
+
+## if done by batches, it is recommended to simply remove the NA of misoginia 
+## of each batch and then join the observations with bindrows
+## resultado <- resultado %>% filter(!is.na(resultado))
+## resultado <- resultado %>% bindrows(resultado_2)
+
+write.csv(resultado, "resultado.csv", row.names = FALSE)
+
+```
+
+As explained before, it was not feasible to fully optimize the prompt function for precise extraction of data from the API output. As a result, the following function, *limpiar_resultados*, was developed to perform post-processing cleanup on the returned dataset. This function focuses on standardizing and refining the textual content within the data frame by removing extraneous labels and metadata embedded in the variables. Specifically, it eliminates detection markers such as *"¿Detectado?: Sí/No"* and redundant phrases like *"Fragmento misógino (si aplica):"*, while also trimming trailing type information to produce cleaner, more concise text fragments.
+
+
+```{r, eval=FALSE}
+limpiar_resultados <- function(resultados_df, drop_garbage = TRUE) {
+    categorias_validas <- c(
+        "Doble Vinculación", 
+        "Ridiculizar", 
+        "Ignorar/Hacer Invisible", 
+        "Culpar y Avergonzar"
+    )
+    
+     patron_explicacion <- "(Este fragmento|Análisis:|\\*\\*Análisis\\*\\*:|El fragmento|En este fragmento,|\\*\\*Justificación\\*\\*:|Se repite el|\\*\\*Nota\\*\\*:|Nota:|Estos fragmentos).*?$"
+     
+    resultados_df <- resultados_df %>%
+        mutate(
+            # Clean fragmento_misogino
+            fragmento_misogino = fragmento_misogino %>%
+                str_remove_all("¿Detectado\\?:\\s*(Sí|No)") %>%
+                str_remove_all("Fragmento misógino \\(si aplica\\):") %>%
+                str_remove_all("Tipo:\\s*.*") %>%
+                str_remove_all("Fragmento misógino\\s*\\(") %>%  
+                str_remove_all("\\.{3,}") %>%                    
+                str_remove_all("\\s{3,}") %>%                   
+                str_remove_all("Fragmento.*$") %>%              
+                str_remove_all("Tipo.*$") %>%                    
+                str_remove_all("¿Detectado.*$") %>%
+        str_replace(patron_explicacion, "") %>%
+                str_squish()
+        ) %>%
+        mutate(
+            categoria = str_extract(categoria, paste(categorias_validas, 
+                                                     collapse = "|")))
+  
+    resultados_df
+}
+
+
+
+completado <- limpiar_resultados(completado)
+
+```
+
+
+## 4. Exploratory data analysis
+
+```{r}
+# execute if necessary
+# completado <- read_csv("completado_sample.csv")
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+completado <- read_csv("completado_2.csv", show_col_types = FALSE)
+```
+
+From a total of 30,924 interventions analyzed, 2,731 interventions were identified as sexist, which represents 8.73% of the total set.
+
+```{r}
+completado %>%
+  summarise(
+    total = n(),
+    sexism = sum(misoginia == "Sí", na.rm = TRUE),
+    percentage = round((sexism / total) * 100, 2))
+```
+
+The majority of sexist interventions fall into the category “Ridiculing” (61.3%), suggesting that discourse of mockery or disdain is the predominant form of sexism in the Spanish congress for the 2019-2023 period.
+
+This is followed by structural forms, “Ignoring or making invisible” (18.7%) and “Blaming and shaming” (17.7%). Furthermore, the category of “Double bind”, although less frequent (2.3%), points to situations in which women face contradictory demands that are impossible to satisfy.
+
+```{r}
+completado %>%
+  filter(misoginia == "Sí") %>%
+  count(categoria) %>%
+  mutate(percentage = round(n / sum(n) * 100, 1)) %>%
+  arrange(desc(n))
+```
+
+```{r}
+completado %>%
+  filter(misoginia == "Sí") %>%
+  count(categoria, sort = TRUE) %>%
+  mutate(
+    categoria = case_when(
+      categoria == "Ridiculizar" ~ "Ridicule",
+      categoria == "Ignorar/Hacer Invisible" ~ "Ignore/Make Invisible",
+      categoria == "Culpar y Avergonzar" ~ "Blame and Shame",
+      categoria == "Doble Vinculación" ~ "Double Bind"),
+    percentage = round(n / sum(n) * 100, 1),
+    categoria = factor(categoria, levels = rev(categoria)))%>%
+  ggplot(aes(x = categoria, y = percentage, fill = categoria)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(percentage, "%")), hjust = -0.5, size = 3) +
+   scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  coord_flip() +
+  scale_fill_brewer(palette = "Set2") + 
+  labs(
+    title = "Category distribution of sexist interventions",
+    x = "Category",
+    y = "Percentage of sexist interventions"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 15, face = "bold", hjust = 0.5),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+Within sexist interventions, the following plot reflects which are the most frequent words.
+
+```{r}
+completado %>%
+  filter(!is.na(fragmento_misogino)) %>%
+  unnest_tokens(word, fragmento_misogino, to_lower = TRUE) %>%
+  filter(
+    !word %in% stopwords("es"),
+    !str_detect(word, "^\\d+$"),
+    nchar(word) > 1
+  ) %>%
+  count(word, sort = TRUE) %>%
+  slice_max(n, n = 10) %>%   # top 10 now
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n, fill = word)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = brewer.pal(10, "Paired")) +
+  labs(
+    title = "Top 10 Most Frequent Words in Sexist Fragments",
+    x = "Word",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 11, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+
+
+```
+
+It can be observed that the word “señora” appears with the highest frequency, suggesting a gendered mode of address that may carry condescending or patronizing undertones in certain contexts. Following closely are “usted” and “ministra”, which imply formal or role-specific references often used in directed speech, potentially reflecting asymmetries in how female politicians are addressed or referenced. Terms such as “ustedes”, “mujeres”, and “gobierno” indicate the presence of collective and institutional references within these fragments.
+
+
+### 4.1 Party distribution
+
+Regarding the party distribution of sexist interventions, PP and Vox parliamentary groups account for almost half (49.6%) of the interventions labeled as sexist, they are also the main groups with the highest frequency.
+
+Following them, PSOE and Cs occupy intermediate positions, with 11.1% and 7.4%, respectively. Unidas Podemos (6%) and regional coalitions have lower proportions.
+
+
+```{r}
+completado %>%
+  filter(misoginia == "Sí") %>%
+  count(FORMACIONELECTORAL, sort = TRUE) %>%
+  mutate(porcentaje = round(n / sum(n) * 100, 1))
+
+```
+
+```{r}
+# define colors of main parties before plotting
+colores_partidos <- c(
+  "PP" = "#00438A",
+  "Vox" = "#66a61e",
+  "UP" = "#7570b3",
+  "Cs" = "#d95f02",
+  "PSOE" = "#FF0000"
+)
+
+todos_los_partidos <- unique(completado$FORMACIONELECTORAL)
+
+# assigning gray for other party coalitions for future plots
+colores_partidos_ext <- setNames(
+  ifelse(todos_los_partidos %in% names(colores_partidos),
+         colores_partidos[todos_los_partidos], 
+         "#BDBDBD"),                            
+  todos_los_partidos)
+```
+
+```{r}
+# plot party distribution
+completado %>%
+  filter(misoginia == "Sí") %>%
+  count(FORMACIONELECTORAL, sort = TRUE) %>%
+  slice_head(n = 5) %>%
+  mutate(FORMACIONELECTORAL = factor(FORMACIONELECTORAL, levels = rev(FORMACIONELECTORAL))) %>%
+  ggplot(aes(x = FORMACIONELECTORAL, y = n, fill = FORMACIONELECTORAL)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = colores_partidos) +
+  labs(
+    title = "Top 5 parties with the most sexist interventions",
+    x = "Political party",
+    y = "Number of interventions"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 10, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5)
+  )
+```
+
+This distribution underscores a notable ideological divide, with right-wing parties contributing disproportionately to sexist discourse in parliament. 
+
+Furthermore, if sexist interventions are examined by political party's total number of interventions, the results reveal significant variation in the proportion of sexist speech. Vox exhibits the highest percentage with approximately 31% of its total speeches classified as such. Followed by PP, whose interventions contain 26.7% sexist content. 
+
+Regional coalitions of the main parties PP and PSOE, including PSE-EE-PSOE (Pais Vasco) and PP-FORO (Asturias), show lower but still notable percentages of 24.1% and 21.1%, respectively.
+
+```{r}
+completado %>%
+  group_by(FORMACIONELECTORAL) %>%
+  summarise(
+    total_intervenciones = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE)) %>%
+  mutate(
+    porcentaje_misoginas = round((misoginas / total_intervenciones) * 100, 1)) %>%
+  arrange(desc(porcentaje_misoginas))
+
+```
+
+Although these rates are slightly lower, they indicate that regional affiliates of major national parties may exhibit comparable rhetorical patterns, thereby reinforcing the underlying ideological trends. 
+
+### 4.2 Interventor
+
+The examination of individual speakers indicates a concentration among members of the principal parties recognized as having a greater prevalence of such interventions. Leading the list is Espinosa de los Monteros (Vox) with 92 such interventions, followed closely by Martínez Oblanca (PP-FORO) with 88 and Olona Choclán (Vox) with 66. 
+
+Other prominent figures include Gamarra Ruiz-Clavijo (PP) and the president of the government, Sánchez Pérez-Castejón (PSOE), with 56 and 51 interventions respectively. Notably, multiple individuals are affiliated with Vox, PP, and Ciudadanos (Cs), suggesting that these parties are disproportionately represented among the top contributors to sexist discourse in the parliamentary sessions.
+
+```{r}
+completado %>%
+  filter(misoginia == "Sí") %>%
+  count(interventor, FORMACIONELECTORAL, sort = TRUE) %>%
+  top_n(10, n)
+```
+
+However, if the results are examined in regard to the total number of interventions of each individual, they show that, while some individuals contributed fewer total interventions, a disproportionately high share of their discourse was sexist. 
+
+For instance, González Guinda (PP) and Ortega Domínguez (PSOE) each had 100% of their recorded interventions classified as sexist. More significantly, speakers like Toscano de Balbín (92.6% of 27 interventions) and López Maraver (76.9% of 13 interventions) from VOX showed consistently high levels of sexism.
+
+```{r}
+completado %>%
+  group_by(interventor, FORMACIONELECTORAL) %>%
+  summarise(
+    total_intervenciones = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE)) %>%
+  mutate(
+    porcentaje_misoginas = round((misoginas / total_intervenciones) * 100, 1)) %>%
+  arrange(desc(porcentaje_misoginas))
+
+```
+
+Such findings highlight the importance of examining not just party affiliation but also individual behavior in understanding the persistence of sexist rhetoric in political discourse. The presence of highly consistent offenders suggests that beyond systemic or cultural factors, individual agency may play a crucial role in shaping sexist parliamentary speech.
+
+```{r}
+# top 10 interventors with most sexist interventions
+top_interventores <- completado %>%
+  group_by(interventor, FORMACIONELECTORAL) %>%
+  summarise(
+    total_intervenciones = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    porcentaje_misoginas = round((misoginas / total_intervenciones) * 100, 1)
+  ) %>%
+  arrange(desc(porcentaje_misoginas)) %>%
+  slice_head(n = 10)  
+
+# Plot
+top_interventores %>%
+  mutate(interventor = fct_reorder(interventor, porcentaje_misoginas)) %>%
+  ggplot(aes(x = interventor, y = porcentaje_misoginas, fill = FORMACIONELECTORAL)) +
+  geom_col(show.legend = TRUE) +
+  coord_flip() +
+  scale_fill_manual(values = colores_partidos_ext) +
+  labs(
+    title = "Top 10 speakers with the most sexist\n interventions (percentage)",
+    x = "Speaker",
+    y = "Sexist interventions per speaker (%)",
+    fill = "Political party"
+  ) +
+  theme_minimal()
+
+```
+
+### 4.3 Gender
+
+If the results are analyzed by gender, a significant disparity in behavior between male and female speakers can be observed. Of the 10,843 interventions delivered by men, 1,522 were classified as sexist, representing 13.9% of their total contributions. 
+
+In contrast, women made 19,782 interventions, with only 1,169 deemed sexist (5.9%). This indicates that male speakers are more than twice as likely to engage in sexist rhetoric compared to their female counterparts, underscoring a clear gender-based difference in the nature of parliamentary discourse.
+
+```{r}
+completado %>%
+  group_by(genero) %>%
+  summarise(
+    total = n(),
+    misognas = sum(misoginia == "Sí", na.rm = TRUE),
+    percentage = round(misognas / total * 100, 1))
+
+```
+
+However, interventions analyzed by both gender and political affiliation, show a suprising pattern. Interestingly,female speakers from PP-FORO and Vox exhibit the highest proportions of misogynistic discourse, with 42.1% and 41.9% of their interventions classified as such, respectively. Among male speakers, those from PSE-EE-PSOE and PP show elevated rates, with 29.4% and 27.6% misogynistic content, followed closely by men from Vox (25.8%).
+
+```{r}
+completado %>%
+  group_by(genero, FORMACIONELECTORAL) %>%
+  summarise(
+    total = n(),
+    misognas = sum(misoginia == "Sí", na.rm = TRUE),
+    percentage = round(misognas / total * 100, 1)
+  ) %>%
+  arrange(desc(percentage))
+
+```
+
+These findings suggest that while gender plays a role in shaping discourse, party alignment within party structures may significantly influence the presence of sexist rhetoric.
+
+### 4.4 Region
+
+Regarding the territorial distribution, the following results show geographic variation across parliamentary constituencies. Huesca ranks highest, with 41.9% of interventions by representants of this region are classified as sexist, followed by Albacete (36.1%) and Guadalajara (33.3%). 
+
+Other constituencies with consistently high percentages include Toledo (31.2%), Lugo (30.3%), and Granada (29.6%).
+
+```{r}
+completado %>%
+  group_by(CIRCUNSCRIPCION) %>%
+  summarise(
+    total = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje = round((misoginas / total) * 100, 1)
+  ) %>%
+  arrange(desc(porcentaje))
+
+```
+
+
+```{r}
+completado %>%
+  filter(!is.na(CIRCUNSCRIPCION)) %>%
+  group_by(CIRCUNSCRIPCION) %>%
+  summarise(
+    total = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje = misoginas / total
+  ) %>%
+  filter(total > 10) %>%
+  arrange(desc(porcentaje)) %>%
+  slice_head(n = 15) %>%
+  ggplot(aes(x = reorder(CIRCUNSCRIPCION, porcentaje), y = porcentaje)) +
+  geom_col(fill = "#69b3a2") +
+  geom_text(aes(label = scales::percent(porcentaje, accuracy = 0.1)),
+            hjust = -0.1, size = 3.5, color = "gray20") +
+  coord_flip(clip = "off") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "Top 15 constituencies with the highest % of sexist\n speeches",
+    subtitle = "Constituencies with a minimum of 10 interventions.",
+    x = "Constituency",
+    y = "% Sexist interventions"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+  plot.title = element_text(face = "bold", size = 15),
+  plot.subtitle = element_text(size = 12, margin = ggplot2::margin(b = 10)),
+  axis.title.y = element_text(margin = ggplot2::margin(r = 10)),
+  axis.title.x = element_text(margin = ggplot2::margin(t = 10)),
+  panel.grid.major.y = element_blank(),
+  panel.grid.minor = element_blank()
+)
+
+```
+
+The intersection of political affiliation and geographic origin highlights specific constituencies where misogynistic discourse is particularly prevalent within certain parties. For instance, in León, all recorded interventions by the Partido Popular (PP) were classified as sexist, yielding a 100% rate—though based on a very small sample. Similarly elevated rates are observed in Guadalajara (Vox, 76.9%), Málaga (PP, 52.9%), and Jaén (PP, 52.6%).
+
+Other PP constituencies such as Huesca, Albacete, and Valladolid also show high levels of sexist content, ranging between 45% and 50%. Vox maintains substantial percentages from representation from Toledo (43.6%) and Granada (42.9%). These patterns suggest that both party affiliation and local political dynamics contribute to the likelihood of misogynistic language being used in parliamentary settings, warranting further inquiry into the profiles and rhetoric of elected representatives in these areas.
+
+```{r}
+completado %>%
+  group_by(CIRCUNSCRIPCION, FORMACIONELECTORAL) %>%
+  summarise(
+    total = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje = round((misoginas / total) * 100, 1)
+  ) %>%
+  arrange(desc(porcentaje))
+```
+
+Among the top 15 constituencies, Vox and PP are the most prominent contributors to sexist discourse, with Vox particularly dominant in constituencies such as Huesca, Guadalajara, Lugo, and Granada. PP also shows significant presence across nearly all top-ranking constituencies. Although less frequent, PSOE, UP, and Cs contribute to the total in certain areas, such as Ceuta and Granada, indicating that while right-wing parties are the main sources of sexist speech, these interventions are not exclusive to them. The data demonstrates a clear geographical and partisan concentration of sexist discourse, with rural and mid-sized constituencies being disproportionately represented among those with the highest rates.
+
+```{r}
+# sexist interventions by party and region
+circunscripcion_partido_misoginia <- completado %>%
+  filter(!is.na(CIRCUNSCRIPCION), !is.na(FORMACIONELECTORAL)) %>%
+  mutate(misoginia = tolower(trimws(misoginia))) %>%
+  group_by(CIRCUNSCRIPCION, FORMACIONELECTORAL) %>%
+  summarise(
+    total_intervenciones = n(),
+    misoginas = sum(misoginia == "sí", na.rm = TRUE),
+    .groups = "drop")
+
+# total interventions per region
+circunscripcion_totales <- circunscripcion_partido_misoginia %>%
+  group_by(CIRCUNSCRIPCION) %>%
+  summarise(
+    total_misoginas = sum(misoginas),
+    total_intervenciones_circ = sum(total_intervenciones),
+    porcentaje_misoginia_circ = total_misoginas / total_intervenciones_circ,
+    .groups = "drop"
+  ) %>%
+  filter(total_intervenciones_circ > 10)
+
+# party contribution to constituency % of sexist interventions
+datos_grafico <- circunscripcion_partido_misoginia %>%
+  inner_join(circunscripcion_totales, by = "CIRCUNSCRIPCION") %>%
+  filter(total_misoginas > 0) %>%
+  mutate(
+    contribucion_partido = (misoginas / total_intervenciones_circ)  
+  )
+
+# top 15 constituencies
+top_circs <- circunscripcion_totales %>%
+  arrange(desc(porcentaje_misoginia_circ)) %>%
+  slice_head(n = 15) %>%
+  pull(CIRCUNSCRIPCION)
+
+datos_grafico_top <- datos_grafico %>%
+  filter(CIRCUNSCRIPCION %in% top_circs) %>%
+    mutate(FORMACIONELECTORAL = 
+             ifelse(FORMACIONELECTORAL %in% names(colores_partidos),
+                                       FORMACIONELECTORAL, "Otros"))
+colores_partidos_ext <- c(colores_partidos, "Other" = "gray70")
+
+# graph
+ggplot(datos_grafico_top, aes(
+  x = fct_reorder(CIRCUNSCRIPCION, porcentaje_misoginia_circ),
+  y = contribucion_partido,
+  fill = FORMACIONELECTORAL)) +
+  geom_col() +
+  geom_text(
+    data = datos_grafico_top %>%
+      group_by(CIRCUNSCRIPCION, porcentaje_misoginia_circ) %>%
+      summarise(y = sum(contribucion_partido), .groups = "drop"),
+    aes(x = fct_reorder(CIRCUNSCRIPCION, porcentaje_misoginia_circ),
+        y = y,
+        label = scales::percent(porcentaje_misoginia_circ, accuracy = 0.1)),
+    inherit.aes = FALSE,
+    hjust = -0.1,
+    size = 3.5,
+    color = "gray20"
+  ) +
+  coord_flip(clip = "off") +
+  scale_fill_manual(values = colores_partidos_ext, name = "Party") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1), 
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(
+   title = "Distribution of sexist interventions by party in each\n constituency",
+    subtitle = "Top 15 constituencies with the highest % of sexist speeches",
+    x = "Constituency",
+    y = "% sexist interventions",
+    fill = "Party") +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 15),
+    plot.subtitle = element_text(size = 12, margin =  ggplot2::margin(b = 10)),
+    axis.title.y = element_text(margin =  ggplot2::margin(r = 10)),
+    axis.title.x = element_text(margin =  ggplot2::margin(t = 10)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank())
+
+```
+
+
+### 4.5 Agenda
+
+Regarding the agenda of each session, the total number of observations, the count of interventions labeled as sexist, and the percentage of such entries within the group are calculated.
+
+
+```{r}
+completado %>%
+  group_by(punto_dia) %>%
+  summarise(
+    total = n(),
+    misoginas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje = round((misoginas / total) * 100, 1)) %>%
+  arrange(desc(porcentaje))
+
+```
+
+The analysis that the agenda topics with the highest concentration of sexist remarks include those directed toward female ministers proposed by VOX. Notably, discussions related to the Ministry of Equality or legislative proposals promoting women's rights such as *Proyecto de ley orgánica de garantía integral de la libertad sexual* attract a disproportionate number of derogatory or dismissive comments. 
+
+This trend is particularly evident in interventions made during debates initiated by right-wing parties such as VOX where sexist language is frequently used to undermine both the legitimacy of the ministry and the authority of female political figures. 
+
+In this regard, when incorporating an additional variable indicating whether the parliamentary agenda includes topics related to gender equality (operationalized through the presence of key themes promoted by the Ministry of Equality during this legislative period, such as *equality* or *pregnancy*), it can be observed that these agenda topics constitute only 3.7% of the total agenda. Regardless, they disproportionately concentrate instances of sexist discourse suggesting a heightened vulnerability of equality-focused discussions to gendered hostility.
+
+```{r}
+completado <- completado %>%
+  mutate(
+    tema_genero = if_else(
+      str_detect(str_to_lower(punto_dia), "mujer|igualdad|sexual|embarazo|mujeres|género"),
+      "Sí", "No") %>% factor(levels = c("No", "Sí")))
+
+
+completado %>%
+  summarise(
+    total_puntos = n(),
+    relacionados_genero = sum(tema_genero == "Sí"),
+    porcentaje_genero = round((relacionados_genero / total_puntos) * 100, 1))
+```
+
+Moreover, the subsequent analysis examines the distribution of sexist interventions relative to the thematic focus of the parliamentary agenda, specifically distinguishing between items related to gender equality and those that are not.
+
+```{r}
+# equality topics by date
+temas_igualdad_por_fecha <- completado %>%
+  group_by(fecha) %>%
+  summarise(
+    tiene_tema_igualdad  = any(tema_genero == "Sí"),
+    .groups = "drop")
+
+# unify gender topics by date
+completado_con_tema <- completado %>%
+  left_join(temas_igualdad_por_fecha, by = "fecha") %>%
+  mutate(tiene_tema_igualdad = replace_na(tiene_tema_igualdad, FALSE))
+
+# summarize results by presence of gender topics
+completado_con_tema %>%
+  group_by(tiene_tema_igualdad) %>%
+  summarise(
+    total_intervenciones = n(),
+    sexistas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje_sexistas = round((sexistas / total_intervenciones) * 100, 1),
+    .groups = "drop")
+
+```
+
+Sessions without equality related topics resulted in 23,640 interventions, from which 2,090 were classified as sexist, representing about 8.5% of the total. Contrarily, the presence of equality topics is considerably less in terms of interventions (7,284 interventions related to these topics), yet the percentage of sexist interventions is higher with 9.6%.
+
+Thus, the data suggests that, although days with an equality agenda have fewer interventions in total, these topics trigger sexist attitudes.
+
+### 4.6 Date
+
+Moreover, the following graph portraits the interventions analyzed by date showing the monthly proportion of parliamentary interventions identified as sexist over a four-year period, aggregated every three months. 
+
+```{r, warning=FALSE}
+completado %>%
+  mutate(
+    fecha = as.Date(fecha, format = "%d/%m/%Y"),
+    mes = floor_date(fecha, "month")
+  ) %>%
+  group_by(mes) %>%
+  summarise(
+    total = n(),
+    misognas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje = round(misognas / total * 100, 1)
+  ) %>%
+  ggplot(aes(x = mes, y = porcentaje)) +
+  geom_line(color = "#D95F02", size = 1) +
+  geom_point(color = "#D95F02", size = 2) +  
+  geom_smooth(method = "loess", span = 0.4, se = FALSE, 
+              color = "gray40", linetype = "dashed") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(0, NA)) +
+  scale_x_date(
+    date_labels = "%b %Y",
+    date_breaks = "3 months",
+    expand = c(0.01, 0.01)
+  ) +
+  labs(
+    title = "Monthly Evolution of Sexist Speech (%) 2019–2023",
+    subtitle = "Proportion of interventions flagged as sexist",
+    x = "Date",
+    y = "% of sexist content"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    panel.grid.minor = element_blank())
+```
+
+The graph reveals a consistently fluctuating pattern, with the percentage of sexist speeches rarely falling below 5% and often spiking above 15%, reaching peaks over 20% at various points, especially in late 2020, mid-2021, and throughout 2023, which align closely with the parliamentary debates and approval of key gender-related legislation in Spain, including the *Ley Trans*, *Ley del solo sí es sí*, and discussions surrounding the reform of *Ley de interrupción voluntaria del embarazo*. These fluctuations suggest that sexist rhetoric is not a constant background element but varies in intensity, potentially correlating with political events or debates, specially, since these laws sparked intense political controversy and public debate, particularly from conservative and far-right sectors.
+
+```{r}
+completado %>%
+  filter(str_detect(str_to_lower(punto_dia), 
+                    "embarazo|igualdad|sexual|mujeres|género")) %>%
+  distinct(fecha, punto_dia) %>%
+  arrange(fecha)
+
+```
+
+Notably, there appears to be an upward trend in the density and height of peaks over time, particularly from mid-2021 onward, after the intensive COVID legislative period (2020-2021). While the grey trend appears relatively stable overall, slight increases toward the end of the period suggest a modest rise in the proportion of sexist discourse. 
+
+
+## 5. Modelling
+
+An exploratory analysis using simple linear regression was carried out before applying machine learning models for the detection of sexist interventions. The objective was to examine whether there are determinants of the percentage of sexist interventions per individual, such as gender, political background, constituency (aggregated at the level of autonomous community), or whether the interventions are related to gender issues.
+
+For this purpose, the data was grouped by person and the total number of interventions, the number of interventions classified as sexist, and the percentage they represent of the total were calculated. In addition, an indicator variable was included on whether the person had ever intervened in a thematic context of gender equality.
+
+In order to avoid excessive dispersion of categories and to facilitate a clear interpretation of the results, the political formations were grouped into five main categories (PSOE, PP, Vox, UP and Cs) and a residual category (“Others”).
+
+```{r}
+formaciones_principales <- c("PSOE", "Vox", "Cs", "PP", "UP")
+individual_data <- completado %>%
+  mutate(formacion_agrupada = ifelse(FORMACIONELECTORAL %in% formaciones_principales, FORMACIONELECTORAL, "Otros")) %>%
+  group_by(interventor, genero, formacion_agrupada, CIRCUNSCRIPCION) %>%
+  summarise(
+    total = n(),
+    sexistas = sum(misoginia == "Sí", na.rm = TRUE),
+    porcentaje_sexistas = (sexistas / total) * 100,
+    tema_genero = any(tema_genero == "Sí"),
+    .groups = "drop"
+  )
+
+modelo <- lm(porcentaje_sexistas ~ genero + formacion_agrupada + tema_genero, data = individual_data)
+
+summary(modelo)
+```
+
+The results of the regression model show that belonging to the Popular Party or Vox is associated, on average, with a significantly higher percentage of sexist interventions at the individual level. A positive and significant association was also observed with having intervened on gender issues. In contrast, neither the gender of the parliamentarian nor other political formations showed statistically significant effects.
+
+Likewise, a second model including the provinces grouped into autonomous communities aims to capture more structural territorial dynamics.
+
+```{r}
+# provinces to CCAA
+provincia_a_ccaa <- c(
+  "Álava" = "País Vasco", "Araba/Álava" = "País Vasco", "Albacete" = "Castilla-La Mancha",
+  "Alicante/Alacant" = "Comunidad Valenciana", "Almería" = "Andalucía",
+  "Asturias" = "Asturias", "Ávila" = "Castilla y León", "Badajoz" = "Extremadura",
+  "Balears (Illes)" = "Islas Baleares", "Barcelona" = "Cataluña", "Bizkaia" = "País Vasco",
+  "Burgos" = "Castilla y León", "Cáceres" = "Extremadura", "Cádiz" = "Andalucía",
+  "Cantabria" = "Cantabria", "Castellón/Castelló" = "Comunidad Valenciana",
+  "Ciudad Real" = "Castilla-La Mancha", "Córdoba" = "Andalucía", "Coruña (A)" = "Galicia",
+  "Cuenca" = "Castilla-La Mancha", "Gipuzkoa" = "País Vasco", "Girona" = "Cataluña",
+  "Granada" = "Andalucía", "Guadalajara" = "Castilla-La Mancha", "Huelva" = "Andalucía",
+  "Huesca" = "Aragón", "Jaén" = "Andalucía", "León" = "Castilla y León",
+  "Lleida" = "Cataluña", "Lugo" = "Galicia", "Madrid" = "Madrid", "Málaga" = "Andalucía",
+  "Murcia" = "Murcia", "Navarra" = "Navarra", "Ourense" = "Galicia",
+  "Palencia" = "Castilla y León", "Palmas (Las)" = "Canarias", "Pontevedra" = "Galicia",
+  "Rioja (La)" = "La Rioja", "Salamanca" = "Castilla y León",
+  "Santa Cruz de Tenerife" = "Canarias", "S/C Tenerife" = "Canarias",
+  "Segovia" = "Castilla y León", "Sevilla" = "Andalucía", "Soria" = "Castilla y León",
+  "Tarragona" = "Cataluña", "Teruel" = "Aragón", "Toledo" = "Castilla-La Mancha",
+  "Valencia/València" = "Comunidad Valenciana", "Valladolid" = "Castilla y León",
+  "Zamora" = "Castilla y León", "Zaragoza" = "Aragón", "Ceuta" = "Ceuta",
+  "Melilla" = "Melilla"
+)
+
+individual_data <- individual_data %>%
+  mutate(CCAA = provincia_a_ccaa[CIRCUNSCRIPCION]) %>%
+  mutate(CCAA = ifelse(is.na(CCAA), "Otros", CCAA))
+
+modelo_ccaa <- lm(porcentaje_sexistas ~ genero + formacion_agrupada + CCAA + tema_genero, data = individual_data)
+
+summary(modelo_ccaa)
+```
+
+The inclusion of the autonomous communities slightly decreased the explanatory power of the model, although none of the autonomous communities was individually significant.
+
+This regression serves an exploratory purpose, helping to identify relevant contextual variables. However, it is important to note that the subsequent machine learning models operate at the individual intervention level, rather than at the speaker level. This shift in the unit of analysis based on the predictive nature of the following section, which requires classifying each intervention as sexist or not based on its content and metadata, rather than modeling speaker tendencies.
+
+Furthermore, in order to investigate the predictive capacity of deep learning methodologies within the context of parliamentary discourse, a series of models were trained to classify whether a given parliamentary intervention exhibits sexist content. The dataset, characterized by a rich combination of linguistic features and contextual metadata, provides a robust foundation for such analysis. Leveraging this structured and multifaceted information, the application of deep learning enables the identification of nuanced and latent patterns associated with sexist language, thereby offering a rigorous evaluation of these techniques’ efficacy in detecting manifestations of sexism in legislative discourse.
+
+### 5.1 Unbalanced data
+
+As an initial step, a neural network was trained on the original, unbalanced dataset. 
+
+```{r}
+# filter valid observations
+datos <- completado %>%
+  filter(!is.na(misoginia)) %>%
+  mutate(misoginia = ifelse(misoginia == "Sí", 1, 0),
+          tema_genero = ifelse(tema_genero == "Sí", 1, 0)) %>%
+  select(misoginia, genero, FORMACIONELECTORAL, 
+         CIRCUNSCRIPCION, tema_genero) %>%
+  na.omit()
+
+# divide train and test data 
+train_index <- createDataPartition(datos$misoginia, p = 0.8, list = FALSE)
+train <- datos[train_index, ]
+test <- datos[-train_index, ]
+
+# dummy variables
+train_dummy <- model.matrix(misoginia ~ . -1, data = train)
+test_dummy <- model.matrix(misoginia ~ . -1, data = test)
+
+# target variables
+y_train <- train$misoginia
+y_test <- test$misoginia
+
+# train model
+modelo <- nnet(train_dummy, y_train, size = 5, maxit = 200, linout = FALSE)
+
+# predict and classify
+pred_prob_imb <- predict(modelo, test_dummy, type = "raw")
+pred_clase_imb <- ifelse(pred_prob_imb > 0.5, 1, 0)
+
+# evaluate
+confusionMatrix(as.factor(pred_clase_imb), as.factor(y_test))
+
+```
+
+Unsurprisingly, the confusion matrix reveals that the model predicts all observations as class "0" with zero true positives or false positives. Consequently, the overall accuracy is high at 90%, closely matching the No Information Rate, indicating that the model’s predictive performance does not exceed a baseline of always predicting the majority class.
+
+Consequently, the model exhibits poor sensitivity and fails to meaningfully identify sexist instances, despite its strong accuracy. This outcome underscores the critical need to address class imbalance using resampling techniques or alternative approaches to improve minority class detection.
+
+
+### 5.2 Balanced data
+
+In the context of imbalanced datasets, it is critical to implement resampling strategies to mitigate model bias toward the majority class. He and Garcia (2009) emphasize that no single resampling technique is universally superior; rather, combining or comparing different strategies is recommended to identify the most suitable approach for a given dataset structure and learning objective.
+
+
+#### ROSE technique
+
+To address the significant class imbalance observed in the initial dataset, the ROSE (Random Over Sampling Examples) technique was applied. This tool allows the generation of new synthetic samples by adding controlled noise to the data distribution (Lunardon,Menardi & Torelli, 2014).
+
+Hence, data was first transformed to ensure categorical variables were treated as factors, and then ROSE was used to generate a balanced dataset considering predictors such as gender, electoral formation, circumscription, and the presence of gender related topics.
+
+```{r, message=FALSE}
+# prepare data
+datos <- datos %>%
+    mutate(
+        genero = as.factor(genero),
+        FORMACIONELECTORAL = as.factor(FORMACIONELECTORAL),
+        CIRCUNSCRIPCION = as.factor(CIRCUNSCRIPCION), 
+        tema_genero = as.factor(tema_genero))
+
+# apply rose
+datos_balanceados <- ROSE(
+    misoginia ~ genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + tema_genero,
+    data = datos)$data
+
+# data partition
+train_index <- createDataPartition(datos_balanceados$misoginia, p = 0.8, 
+                                   list = FALSE)
+train <- datos_balanceados[train_index, ]
+test <- datos_balanceados[-train_index, ]
+
+# dummy variables
+train_dummy <- model.matrix(misoginia ~ . -1, data = train)
+test_dummy <- model.matrix(misoginia ~ . -1, data = test)
+
+# 
+y_train <- train$misoginia
+y_test <- test$misoginia
+
+# train model
+modelo <- nnet(train_dummy, y_train, size = 5, maxit = 200, linout = FALSE)
+
+# prediction
+pred_prob_rose  <- predict(modelo, test_dummy, type = "raw")
+pred_clase_rose  <- ifelse(pred_prob_rose > 0.5, 1, 0)
+
+# confusion matrix
+confusionMatrix(as.factor(pred_clase_rose), as.factor(y_test))
+
+```
+
+The confusion matrix indicates that the model achieves an overall accuracy of 78%, substantially higher than the No Information Rate of 50%, with a highly significant p-value, demonstrating meaningful predictive capability. Or in other words, the model performs significantly better than a random classifier. 
+
+Sensitivity (true positive rate) stands at 70% approx., while specificity (true negative rate) is higher at 86% approx. The positive predictive value (precision) is 84%, and the negative predictive value is 74%, showing a relatively balanced performance.  
+
+```{r}
+# define variable importance in a data frame
+importancia <- varImp(modelo)
+
+df_importancia <- as.data.frame(importancia)
+
+df_importancia$Variable <- rownames(df_importancia)
+df_importancia$Variable <- colnames(train_dummy)
+
+# order by overall importance
+df_importancia <- df_importancia %>%
+  arrange(desc(Overall)) %>%
+  slice_max(order_by = Overall, n = 10)  
+
+# graph most important variables
+ggplot(df_importancia, aes(x = fct_reorder(Variable, Overall), y = Overall)) +
+  geom_col(fill = "#2c7fb8", width = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Top 10 most important variables",
+    x = NULL,
+    y = "Importance (Overall)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(face = "bold", size = 16),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+The variables of different constituencies accompanied by regional parties, highlight the significance of geographical and political affiliations in the model's predictive capacity. Gender, specifically the category women, also ranks prominently, indicating its relevance in the modeled outcomes. 
+
+These results indicate that multiple predictors significantly influence the neural network's output, highlighting the complex and multifactorial nature of the factors contributing to sexist outcomes.
+
+```{r, warning=FALSE}
+# AUC
+roc_obj <- roc(response = test$misoginia, predictor = pred_prob_rose)
+auc(roc_obj)
+plot(roc_obj, col = "blue", main = "ROC Curve")
+```
+
+Furthermore, the Area Under the Curve (AUC) shows that if you randomly pick one positive example and one negative example, the model will correctly rank the positive example higher than the negative one about 86% of the time, revealing a strong overall performance.
+
+
+#### Cross-validation and Undersampling
+
+Contrarily, the following model employs a combination of cross-validation (5-fold) and undersampling techniques to address the observed class imbalance. 
+
+```{r}
+# ensure data is a factor
+datos <- datos %>%
+  mutate(
+    genero = as.factor(genero),
+    FORMACIONELECTORAL = as.factor(FORMACIONELECTORAL),
+    CIRCUNSCRIPCION = as.factor(CIRCUNSCRIPCION),
+    misoginia = as.factor(misoginia), 
+    tema_genero = as.factor(tema_genero)
+  )
+
+# data partition
+train_index <- createDataPartition(datos$misoginia, p = 0.8, list = FALSE)
+train <- datos[train_index, ]
+test <- datos[-train_index, ]
+
+# undersampling
+ctrl <- trainControl(method = "cv", number = 5, sampling = "down")
+
+# model training
+modelo <- train(
+  misoginia ~ genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + tema_genero,
+  data = train,
+  method = "nnet",
+  trControl = ctrl,
+  trace = FALSE
+)
+
+# prediction and evaluation
+pred_clase_manual <- predict(modelo, newdata = test)
+
+pred_prob_manual <- predict(modelo, newdata = test, type = "prob")[, 2] 
+
+# confusion matrix
+confusionMatrix(pred_clase_manual, test$misoginia)
+```
+
+The performance metrics reveal an overall accuracy of 71%, which falls short of the No Information Rate (NIR) of 90.91%, and the p-value of 1 indicates that this model does not significantly outperform a naive classifier predicting the majority class. Despite the model's accuracy,  there is a noticeable disparity in predictive values: the positive predictive value is high at 97%, but the negative predictive value is very low at 21%, indicating limited reliability in predicting the minority class.
+
+Overall, the previous ROSE model outperforms this one in terms of statistical significance, predictive balance, and practical utility.
+
+```{r}
+# variable importance
+importancia <- varImp(modelo)
+df_importancia <- importancia$importance
+
+df_importancia$Variable <- rownames(df_importancia)
+
+df_importancia <- df_importancia[order(-df_importancia$Overall), ]
+
+df_importancia <- importancia$importance %>%
+  mutate(Variable = rownames(.)) %>%
+  arrange(desc(Overall)) %>%
+  slice_max(order_by = Overall, n = 10)  
+
+ggplot(df_importancia, aes(x = fct_reorder(Variable, Overall), y = Overall)) +
+  geom_col(fill = "#2c7fb8", width = 0.8) +
+  coord_flip() +
+  labs(
+    title = "Top 10 most important variables",
+    x = NULL,
+    y = "Importance (Overall)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.y = element_text(size = 10),
+    plot.title = element_text(face = "bold", size = 16),
+    panel.grid.minor = element_blank()
+  )
+
+
+```
+
+#### XGBOOST Model
+
+In addition to neural networks with undersampling, gradient boosting through the XGBoost algorithm, was trained on a preprocessed dataset (test_baked) that included engineered features and applied resampling techniques to mitigate class imbalance effects.
+
+
+```{r}
+# prepare data
+datos <- datos %>%
+  mutate(
+    misoginia = factor(misoginia, 
+    levels = c("0", "1"), labels = c("No", "Yes")))
+
+# division train test
+train_index <- createDataPartition(datos$misoginia, p = 0.8, list = FALSE)
+train <- datos[train_index, ]
+test <- datos[-train_index, ]
+
+# recipe creation
+receta <- recipe(misoginia ~ ., data = train) %>%
+  step_dummy(all_nominal_predictors(), -all_outcomes()) %>%
+  step_smote(misoginia, over_ratio = 1)
+
+receta_prep <- prep(receta, training = train)
+train_baked <- bake(receta_prep, new_data = NULL)
+test_baked <- bake(receta_prep, new_data = test)
+
+# cross-validation
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# xgboost
+modelo_xgb <- train(
+  misoginia ~ .,
+  data = train_baked,
+  method = "xgbTree",
+  trControl = ctrl,
+  metric = "ROC",
+  verbose = 0)
+
+# prediction
+pred_clase_xgb <- predict(modelo_xgb, newdata = test_baked)
+pred_prob_xgb <- predict(modelo_xgb, newdata = test_baked, type = "prob")[, 2]
+```
+
+
+```{r}
+# confusion matrix
+confusionMatrix(pred_clase_xgb, test_baked$misoginia)
+
+# variable importance
+importancia <- varImp(modelo_xgb)
+
+df_imp <- importancia$importance %>%
+  rownames_to_column(var = "Variable") %>%
+  arrange(desc(Overall)) %>%
+  slice_max(order_by = Overall, n = 10) 
+
+ggplot(df_imp, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(title = "Top 10 most improtant variables (XGBoost)",
+       x = NULL, y = "Importancia") +
+  theme_minimal()
+
+```
+
+
+The XGBoost model achieves an overall accuracy of 74%, which is lower than the No Information Rate of 90.91%, with a p-value of 1, indicating that the model does not significantly outperform a naive classifier that always predicts the majority class. In addition, while the positive predictive value is strong at 96%, the negative predictive value remains very low at 22%, indicating that predictions for the minority class are still unreliable.
+
+Compared to the ROSE model, XGBoost performs worse overall, especially in accuracy and statistical significance, as well as AUC metrics.
+
+```{r}
+# AUC
+roc_obj <- roc(response = test$misoginia, predictor = pred_prob_xgb)
+auc(roc_obj)
+plot(roc_obj, col = "blue", main = "ROC Curve")
+```
+
+
+#### Random Forest Model
+
+Finally, a random forest model was trained using the balanced and preprocessed training dataset generated through the recipe pipeline, which included dummy encoding of categorical variables and the application of SMOTE to address class imbalance.
+
+```{r, message=FALSE, warning=FALSE}
+# rf model
+modelo_rf <- train(
+  misoginia ~ .,
+  data = train_baked,
+  method = "rf",
+  trControl = ctrl,
+  metric = "ROC")
+
+# prediction
+pred_clase_rf <- predict(modelo_rf, newdata = test_baked)
+
+pred_prob_rf <- predict(modelo_rf, newdata = test_baked, type = "prob")[, "Yes"]
+
+
+# confusion matrix
+confusionMatrix(pred_clase_rf, test_baked$misoginia)
+
+
+# variable importance
+importancia <- varImp(modelo_rf)
+
+df_imp <- importancia$importance %>%
+  rownames_to_column(var = "Variable") %>%
+  arrange(desc(Overall)) %>%
+  slice_max(order_by = Overall, n = 10)
+
+# graph variable importance
+ggplot(df_imp, aes(x = reorder(Variable, Overall), y = Overall)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(title = "Top 10 most important variables (rf)",
+       x = NULL, y = "Importancia") +
+  theme_minimal()
+
+
+# AUC
+roc_obj <- roc(response = test_baked$misoginia, predictor = pred_prob_rf)
+
+auc(roc_obj)
+
+plot(roc_obj, col = "blue", main = "ROC Curve")
+```
+
+The confusion matrix reveals the model's accuracy is 75%, indicating that the model correctly classifies approximately three-quarters of the observations. However, the Kappa statistic of 0.25 suggests only a fair level of agreement beyond chance.
+
+The positive predictive value (97%) reflects high precision for the 'No' predictions, whereas the negative predictive value (23%) is notably low, indicating a high rate of false negatives. The imbalance in prevalence (70%) suggests that the dataset is skewed toward the 'No' class, which may influence model performance metrics.
+
+Overall, while the model exhibits reasonable discriminative ability, its effectiveness is limited by the low negative predictive value, a modest Kappa statistic, and a non-significant p-value, all of which suggest a limited capacity to reliably identify the minority class.
+
+### 5.3 Keras
+
+To complement the previous analysis, Keras was employed as a deep learning framework to develop a neural network model capable of classifying instances of misogyny based on demographic and contextual features. This approach enables the exploration of predictive patterns that may be challenging to model with traditional statistical methods, thereby providing a robust tool for addressing the classification problem at hand.
+
+Keras’s compatibility with R, via the reticulate package, allows for seamless integration into the data science workflow, facilitating reproducibility and scalability (for isntalaltion process, please refer to the **README** file).
+
+However, it is essential to begin with a clean environment to ensure the proper functioning of Keras.
+
+```{r, warning=FALSE, message=FALSE}
+
+rm(list = ls()) # remove old variables
+
+packages = c("nnet", "dplyr", "caret", "tidyr", "recipes", "themis", "tidyverse", "keras", "ROSE", "yardstick", "rsample", "tidytext", "lime", "pROC", "tidymodels", "textrecipes", "vip", "reticulate", "ranger")
+
+package.check <- lapply(packages,
+                        FUN = function(x){
+                          if (!require(x,character.only = TRUE)){
+                            install.packages(x,dependencies = TRUE)
+                            library(x, character.only = TRUE)
+                          }
+                        })
+```
+
+The first step involves creating and activating a dedicated virtual environment which ensures isolation and reproducibility of required dependencies.   
+
+```{r}
+reticulate::use_virtualenv("r-keras-env", required = TRUE)
+```
+
+Then, the data is loaded and the data for the models is stored.
+
+```{r, warning=FALSE, message=FALSE}
+# execute if necessary
+completado <- read_csv("completado_2.csv")
+
+completado <- completado %>%
+  mutate(
+    tema_genero = if_else(
+      str_detect(str_to_lower(punto_dia), "mujer|igualdad|sexual|embarazo|mujeres|género"),
+      "Sí", "No"
+    ) %>% factor(levels = c("No", "Sí"))
+  )
+
+datos <- completado %>%
+  filter(!is.na(misoginia)) %>%
+  mutate(misoginia = ifelse(misoginia == "Sí", 1, 0)) %>%
+  select(misoginia, genero, FORMACIONELECTORAL, CIRCUNSCRIPCION, tema_genero) %>%
+  na.omit()
+```
+
+This following script prepares the data, builds, trains, and evaluates a neural network classifier using Keras in R. To address class imbalance in the target variable, it applies two resampling techniques (ROSE and SMOTE) before training separate models on the original and balanced datasets.
+
+To observe the results of different resampling techniques, ROSE is compared to SMOTE (Synthetic Minority Over-sampling Technique), which addresses data imbalance by generating synthetic minority instances through linear interpolation between existing examples and therefore, reducing the risk of overfitting (Chawla et al., 2002). 
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(123)
+# data division test-train
+train_index <- createDataPartition(datos$misoginia, p = 0.8, list = FALSE)
+train_orig <- datos[train_index, ]
+test <- datos[-train_index, ]
+
+# convert to factor
+train_orig <- train_orig %>%
+  mutate(
+    misoginia = factor(misoginia),
+    genero = factor(genero, ordered = FALSE),
+    FORMACIONELECTORAL = factor(FORMACIONELECTORAL, ordered = FALSE),
+    CIRCUNSCRIPCION = factor(CIRCUNSCRIPCION, ordered = FALSE))
+
+test <- test %>%
+  mutate(
+    misoginia = factor(misoginia),
+    genero = factor(genero, ordered = FALSE),
+    FORMACIONELECTORAL = factor(FORMACIONELECTORAL, ordered = FALSE),
+    CIRCUNSCRIPCION = factor(CIRCUNSCRIPCION, ordered = FALSE))
+
+
+# keras model
+crear_modelo_keras <- function(input_dim) {
+  model <- keras_model_sequential() %>%
+    layer_dense(units = 16, activation = "relu", input_shape = input_dim) %>%
+    layer_dropout(rate = 0.2) %>%
+    layer_dense(units = 8, activation = "relu") %>%
+    layer_dense(units = 2, activation = "softmax")
+  
+  model %>% compile(
+    loss = "categorical_crossentropy",
+    optimizer = optimizer_adam(),
+    metrics = c("accuracy"))
+  
+  return(model)}
+
+# prepare data function
+preparar_keras <- function(data, colnames_ref = NULL) {
+  y_numeric <- as.numeric(as.character(data$misoginia))
+  y <- to_categorical(y_numeric)
+  
+  data_x <- data %>% select(-misoginia)
+  
+
+  data_x[] <- lapply(data_x, function(col) {
+    if (is.factor(col) || is.character(col)) {
+      as.numeric(as.factor(col))
+    } else {
+      col}
+  })
+  
+  x <- as.matrix(data_x)
+  
+  if (!is.null(colnames_ref)) {
+    missing_cols <- setdiff(colnames_ref, colnames(x))
+    if (length(missing_cols) > 0) {
+      zeros_mat <- matrix(0, nrow = nrow(x), ncol = length(missing_cols))
+      colnames(zeros_mat) <- missing_cols
+      x <- cbind(x, zeros_mat)
+    }
+    x <- x[, colnames_ref]
+  } else {
+    colnames_ref <- colnames(x)
+  }
+  
+  list(x = x, y = y, colnames = colnames_ref)}
+
+# evaluation function
+evaluar_keras <- function(train_data, test_data, metodo) {
+  datos_train <- preparar_keras(train_data)
+  datos_test <- preparar_keras(test_data, datos_train$colnames)
+  
+  model <- crear_modelo_keras(ncol(datos_train$x))
+  
+  model %>% fit(
+    x = datos_train$x,
+    y = datos_train$y,
+    epochs = 30,
+    batch_size = 32,
+    verbose = 0)
+  
+  pred <- model %>% predict(datos_test$x)
+  pred_class <- apply(pred, 1, which.max) - 1
+  real_class <- apply(datos_test$y, 1, which.max) - 1
+  
+  truth <- factor(real_class, levels = c(0, 1))
+  estimate <- factor(pred_class, levels = c(0, 1))
+  
+  res <- yardstick::metrics(
+    data.frame(truth = truth, estimate = estimate),
+    truth, estimate)
+  res$metodo <- metodo
+  
+  list(
+    metrics = res,
+    truth = truth,
+    estimate = estimate,
+    prob = pred[, 2]
+  )}
+
+# ROSE balance
+train_rose <- ROSE(
+  misoginia ~ genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + tema_genero,
+  data = train_orig)$data
+
+# SMOTE with balance
+rec <- recipe(misoginia ~ genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + 
+                tema_genero, data = train_orig) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_smote(misoginia)
+
+prep_rec <- prep(rec)
+train_smote <- bake(prep_rec, new_data = NULL)
+test_smote <- bake(prep_rec, new_data = test)
+
+# apply avaluation fucntion
+res_original <- evaluar_keras(train_orig, test, "Original")
+res_rose     <- evaluar_keras(train_rose, test, "ROSE")
+res_smote    <- evaluar_keras(train_smote, test_smote, "SMOTE")
+
+# results
+resultados <- bind_rows(res_original$metrics, res_rose$metrics, res_smote$metrics) %>%
+  pivot_wider(names_from = .metric, values_from = .estimate)
+
+print(resultados)
+
+```
+
+These results reveal an interesting trade-off between accuracy and balanced classification performance across the different data preparation methods applied to the neural network model. The model trained on the original, imbalanced dataset achieves the highest overall accuracy (90%) but exhibits a very low Kappa statistic (0), indicating that its predictive ability is barely better than random chance beyond the dominant class. This reflects a likely bias toward the majority class, which inflates accuracy but limits meaningful discrimination of the minority class.
+
+In contrast, models trained on balanced datasets created via ROSE and SMOTE resampling show substantially lower accuracy values, yet both exhibit markedly improved Kappa values around 0.2, signaling better agreement beyond chance. This suggests these resampling techniques help the model better capture patterns in the minority class despite a reduction in overall accuracy. 
+
+Based on the previously reported performance metrics, the  model trained with SMOTE was identified as the best-performing approach with an accuracy of 69% and a Kappa statistic of 0.23 approximately. To further assess its effectiveness, the confusion matrix and AUC are examined.
+
+```{r}
+# results for SMOTE (better performance in KERAS)
+confusionMatrix(res_smote$estimate, res_smote$truth, positive = "1")
+
+roc_obj <- roc(res_smote$truth, res_smote$prob)
+plot(roc_obj, col = "blue", print.auc = TRUE, main = "ROC Curve - Keras")
+
+
+```
+
+The model attained an accuracy of 69% with a 95% confidence interval ranging from 68% to 70%. However, the p-value associated with the accuracy exceeding the No Information Rate suggests that the improvement over a random classifier is not statistically significant. 
+
+### 5.4 Long Short-Term Memory (LSTM)
+
+Furthermore, the following step develops a binary text classification model to detect misogynistic content in speech interventions, combining natural language processing with deep learning techniques: a Long Short-Term Memory (LSTM) neural network, which is well-suited for capturing sequential dependencies in text data (Hochreiter and Schmidhuber, 1997). 
+
+Furthermore, to account for class imbalance class weighting is introduced during training to prevent the model from converging on trivial majority-class predictions. Since ROSE does not support text, this practice ensures the network remains attentive to the minority class patterns (He & Garcia, 2009).
+
+The workflow includes comprehensive data preprocessing, model training using Keras, and performance evaluation based on standard classification metrics. Additionally, interpretability is addressed through the application of LIME, offering insights into the model’s decision-making process.
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(123)
+
+#data preparation and preprocessing
+datos <- completado %>%
+  filter(!is.na(misoginia), !is.na(intervencion), intervencion != "") %>%
+  mutate(
+    misoginia = ifelse(misoginia == "Sí", 1, 0),
+    misoginia = as.factor(misoginia)
+  ) %>%
+  select(misoginia, genero, FORMACIONELECTORAL, CIRCUNSCRIPCION, 
+         interventor, categoria, intervencion, tema_genero)
+
+# split train-test data
+split <- initial_split(datos, prop = 0.8, strata = misoginia)
+train_data <- training(split)
+test_data  <- testing(split)
+
+# extraxt text
+train_text <- train_data$intervencion
+test_text  <- test_data$intervencion
+
+y_train <- as.numeric(as.character(train_data$misoginia))
+y_test  <- as.numeric(as.character(test_data$misoginia))
+
+# tokenization + padding
+max_words <- 5000
+maxlen <- 100
+
+tokenizer <- text_tokenizer(num_words = max_words, oov_token = "<OOV>")
+fit_text_tokenizer(tokenizer, train_text)
+
+x_train_seq <- texts_to_sequences(tokenizer, train_text)
+x_test_seq  <- texts_to_sequences(tokenizer, test_text)
+
+x_train_pad <- pad_sequences(x_train_seq, maxlen = maxlen, padding = "post")
+x_test_pad  <- pad_sequences(x_test_seq, maxlen = maxlen, padding = "post")
+
+# label encoding for nn
+y_train_cat <- to_categorical(y_train)
+y_test_cat  <- to_categorical(y_test)
+
+# class weights to handle class imbalance
+class_weights <- list(
+  "0" = 1 / table(y_train)[["0"]],
+  "1" = 1 / table(y_train)[["1"]])
+total <- sum(unlist(class_weights))
+class_weights <- lapply(class_weights, function(x) x / total)
+
+# model nn
+model <- keras_model_sequential() %>%
+  layer_embedding(input_dim = max_words, output_dim = 64, input_length = maxlen) %>%
+  layer_lstm(units = 64) %>%
+  layer_dropout(0.2) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 2, activation = "softmax")
+
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = "adam",
+  metrics = c("accuracy"))
+
+# model training
+history <- model %>% fit(
+  x_train_pad, y_train_cat,
+  epochs = 5,
+  batch_size = 32,
+  validation_split = 0.2,
+  class_weight = class_weights)
+
+# evaluation
+model %>% evaluate(x_test_pad, y_test_cat)
+
+# prediction
+pred_probs <- model %>% predict(x_test_pad)
+pred_class <- apply(pred_probs, 1, which.max) - 1
+
+# model evaluation
+truth <- factor(y_test, levels = c(0, 1))
+estimate <- factor(pred_class, levels = c(0, 1))
+
+yardstick::metrics(data.frame(truth, estimate), truth, estimate) %>%
+  bind_rows(
+    precision(data.frame(truth, estimate), truth, estimate),
+    recall(data.frame(truth, estimate), truth, estimate),
+    f_meas(data.frame(truth, estimate), truth, estimate))
+
+```
+
+These results indicate an overall accuracy of approximately 83% and a precision of around 95%, meaning that when the model predicts an intervention as sexist, it is almost always correct, effectively minimizing false positives. The recall of 87% demonstrates the model’s strong ability to identify the majority of actual sexist cases, with a moderate number of false negatives.
+
+However, the relatively low Kappa value of 0.28 suggests that despite the respectable accuracy, the agreement between predicted and true labels beyond chance is limited, likely due to the imbalanced nature of the dataset. The F1-score of approximately 0.9 reflects a good balance between precision and recall, indicating the model performs robustly in detecting sexist content while managing both false positives and false negatives effectively.
+
+Building on the valuation, the following code applies the trained LSTM model to the test data to generate predictions and assess its performance.
+
+```{r}
+set.seed(123)
+# tokenization and padding
+test_seq <- texts_to_sequences(tokenizer, test_data$intervencion)
+test_pad <- pad_sequences(test_seq, maxlen = maxlen, padding = "post")  # maxlength
+
+# labels
+test_labels <- as.numeric(as.character(test_data$misoginia))
+
+# predictions
+pred_prob <- model %>% predict(test_pad)
+pred_class <- apply(pred_prob, 1, which.max) - 1
+
+# factors for confusion matrix
+truth <- factor(test_labels, levels = c(0, 1))
+estimate <- factor(pred_class, levels = c(0, 1))
+
+# confusion matrix
+conf_mat <- caret::confusionMatrix(estimate, truth)
+print(conf_mat)
+
+# AUC
+roc_obj <- pROC::roc(response = test_labels, predictor = pred_prob[,2])
+plot(roc_obj, main = "Curva ROC")
+auc_val <- pROC::auc(roc_obj)
+
+print(auc_val)
+
+```
+
+The model achieved an overall accuracy of approximately 84%, indicating a moderate level of correct classification across both classes. The Kappa statistic of 0.28 suggests a fair agreement between predicted and true labels beyond chance, reflecting some challenges likely related to class imbalance. Sensitivity for the positive class (non-sexist interventions) was 86%, while specificity was notably lower at 53%, showing the model is better at correctly identifying the positive class. The positive predictive value of 95% further emphasizes the model’s strength in minimizing false positives for the dominant class, but the low negative predictive value (28%) highlights difficulties in reliably identifying the minority class.
+
+Importantly, the balanced accuracy of 69% suggests a reasonable trade-off between sensitivity and specificity. The model's discriminative ability is further supported by an AUC of 0.83 approx., indicating strong capacity to distinguish between sexist and non-sexist interventions. 
+
+Overall, although several metrics indicate strong model performance, further refinements are necessary to enhance its ability to accurately identify the minority class significantly.
+
+Furthermore,  LIME (Local Interpretable Model-agnostic Explanations) is employed to interpret predictions made by a deep learning model classifying parliamentary interventions as sexist or not. The custom prediction function (*predict_function_suave*) incorporates a temperature-based smoothing mechanism, moderating the model’s output probabilities to better reflect uncertainty in predictions. LIME is used here to explain individual predictions by identifying the specific features (words) within a speech that most influenced the model's decision, either supporting or contradicting the classification.
+
+```{r}
+# prediction with predefined temperature to smooth prediction probabilities 
+predict_function_suave <- function(texts, temp = 0.5) {
+  seqs <- texts_to_sequences(tokenizer, texts)
+  pads <- pad_sequences(seqs, maxlen = maxlen, padding = "post")
+  preds <- predict(model, pads)
+  preds_temp <- preds ^ temp
+  preds_temp <- preds_temp / rowSums(preds_temp)
+  colnames(preds_temp) <- c("No", "Sí")
+  as.data.frame(preds_temp)}
+
+# define class
+class(predict_function_suave) <- "my_model"
+
+model_type.my_model <- function(x, ...) {
+  "classification"}
+
+# prediction function
+predict.my_model <- function(object, newdata, type = NULL, ...) {
+  object(newdata)}
+
+# LIME explainer 
+explainer <- lime::lime(
+  x = train_text,
+  model = predict_function_suave,
+  preprocess = NULL)
+
+# text to explain
+textos_a_explicar <- completado %>%
+    filter(punto_dia == "- Proyecto de ley orgánica de garantía integral de la libertad sexual. 'BOCG. Congreso de los Diputados', serie A, número 62-1, de 26 de julio de 2021. ...") %>%
+  pull(intervencion)
+
+# apply
+explicaciones <- lime::explain(
+  textos_a_explicar,
+  explainer = explainer,
+  n_labels = 1,
+  n_features = 5,
+  n_permutations = 20) # limited computational capacities
+
+# feature importance
+overall_importance <- explicaciones %>%
+  group_by(feature) %>%
+  summarise(mean_weight = mean(abs(feature_weight))) %>%
+  arrange(desc(mean_weight))
+
+# top 15 features for clearer plotting
+top_features <- overall_importance %>% slice_max(mean_weight, n = 15)
+
+ggplot(top_features, aes(x = reorder(feature, mean_weight), y = mean_weight)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Overall Feature Importance (LIME)",
+       x = "Feature",
+       y = "Mean Absolute Feature Weight")
+
+```
+
+Due to limited computational resources and time constraints, it was not feasible to extend the LIME analysis to the entire dataset. Instead, the interpretability analysis is applied here to a specific subset of the data corresponding to a concrete agenda topic related to gender issues (*"Proyecto de ley orgánica de garantía integral de la libertad sexual."*), which serves as a practical example to illustrate the model’s explanatory capabilities.  
+
+The term "existencia" stands out as the most impactful, followed closely by words such as "llegamos", "aprueben", and "legislativa" which often appear in assertive or action-oriented speech, reflecting the model’s sensitivity to political discourse structures. Additionally, the presence of terms like "igualdad", "nuestras", and "sometidas" suggests the model is attuned to gender-related language and collective references, underlining the thematic relevance of the subset used.
+
+
+### 5.5 RF Model using TF-IDF
+
+The final model trained for the classification task utilized a random forest algorithm within a structured machine learning workflow. The classifier with 500 trees is trained using the ranger engine, incorporating impurity-based feature importance to identify which textual and categorical features are most predictive of sexist content.
+
+#### Unbalanced data
+
+The evaluation of the classification model on the unbalanced dataset shows a high overall accuracy of 91%, along with perfect sensitivity of 1.0, indicating that the model correctly identifies all instances of the sexist interventions. Precision is also high at 91%, suggesting that most predicted sexist interventions are true positives. 
+
+However, the specificity is extremely low at 2%, revealing that the model struggles to correctly identify the majority class (non-sexist) resulting in many false positives. 
+
+```{r}
+set.seed(123)
+# data split
+split <- initial_split(datos, strata = misoginia)
+train_data <- training(split)
+test_data  <- testing(split)
+
+# prepare recipe (tokenize, filter stopwords)
+receta <- recipe(misoginia ~ intervencion + genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + tema_genero, data = train_data) %>%
+  step_tokenize(intervencion) %>%
+  step_stopwords(intervencion, language = "es") %>% 
+  step_tokenfilter(intervencion, max_tokens = 1000) %>%
+  step_tfidf(intervencion) %>%
+  step_unknown(all_nominal_predictors()) %>%  
+  step_dummy(all_nominal_predictors())      
+
+
+# define model
+modelo_rf <- rand_forest(mode = "classification", trees = 500) %>%
+  set_engine("ranger", importance = "impurity")
+
+# workflow
+wf <- workflow() %>%
+  add_model(modelo_rf) %>%
+  add_recipe(receta)
+
+fit_rf <- wf %>% fit(data = train_data)
+
+# prediction and evaluation
+preds <- predict(fit_rf, test_data, type = "prob") %>%
+  bind_cols(predict(fit_rf, test_data)) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, kap, sens, spec, precision, recall, f_meas, bal_accuracy)
+metrics(preds, truth = misoginia, estimate = .pred_class)
+
+# binomial test
+correct <- sum(preds$misoginia == preds$.pred_class)
+total <- nrow(preds)
+p_null <- max(prop.table(table(preds$misoginia)))
+binom.test(correct, total, p = p_null, alternative = "greater")
+
+# confusion matrix
+conf_mat(data = preds, truth = misoginia, estimate = .pred_class)
+```
+
+A binomial test assessing whether the observed accuracy is significantly greater than the proportion of the majority class yielded a p-value of 0.28, indicating that the accuracy is not statistically superior to a naive classifier that predicts the majority class.
+
+Furthermore, the following plot presents the feature importance rankings derived from the model. The most influential features are overwhelmingly gendered or formal address terms such as *señora*, *usted*, and *ministra*.  Political party affiliation features, *Vox* and *PSC-PSOE* are among the top contributors. Since the input data is unbalanced, the model may be capturing superficial correlations rather than deeper linguistic or contextual signals of sexism, potentially overfitting features that are simply more frequent in the minority class.
+
+```{r}
+vip(extract_fit_parsnip(fit_rf))
+```
+
+#### Balanced data
+
+When the model is evaluated on a balanced dataset, performance metrics vary in critical areas. 
+
+```{r}
+set.seed(123)
+
+# data split
+split <- initial_split(datos, strata = misoginia)
+train_data <- training(split)
+test_data  <- testing(split)
+
+# prepare recipe (tokenize, filter stopwords)
+receta <- recipe(misoginia ~ intervencion + genero + FORMACIONELECTORAL + CIRCUNSCRIPCION + tema_genero, data = train_data) %>%
+  step_tokenize(intervencion) %>%
+  step_stopwords(intervencion, language = "es") %>% 
+  step_tokenfilter(intervencion, max_tokens = 1000) %>%
+  step_tfidf(intervencion) %>%
+  step_unknown(all_nominal_predictors()) %>%  
+  step_dummy(all_nominal_predictors()) %>%
+  step_downsample(misoginia) # downsampling due to class imbalance      
+
+
+# define model
+modelo_rf <- rand_forest(mode = "classification", trees = 500) %>%
+  set_engine("ranger", importance = "impurity")
+
+# workflow
+wf <- workflow() %>%
+  add_model(modelo_rf) %>%
+  add_recipe(receta)
+
+fit_rf <- wf %>% fit(data = train_data)
+
+# prediction and evaluation
+preds <- predict(fit_rf, test_data, type = "prob") %>%
+  bind_cols(predict(fit_rf, test_data)) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, kap, sens, spec, precision, recall, f_meas, bal_accuracy)
+metrics(preds, truth = misoginia, estimate = .pred_class)
+
+# binomial test
+correct <- sum(preds$misoginia == preds$.pred_class)
+total <- nrow(preds)
+p_null <- max(prop.table(table(preds$misoginia)))
+binom.test(correct, total, p = p_null, alternative = "greater")
+
+# confusion matrix
+conf_mat(data = preds, truth = misoginia, estimate = .pred_class)
+```
+
+The balanced model sacrifices some raw accuracy (71%) but achieves much higher balanced accuracy (80%), stronger agreement beyond chance (Kappa = 0.26), and drastically improved specificity (93%), indicating it distinguishes between both classes.
+
+```{r}
+vip(extract_fit_parsnip(fit_rf))
+```
+
+In contrast to the previous results, the feature importance rankings show different results. While some gendered or formal language features like *usted* and *señora* remain prominent, their relative importance is more tempered and distributed. New features such as *PSC.PSOE* and *Barcelona* emerge as significant predictors, indicating a broader set of influential variables in the balanced setting. These features may reflect underlying political, regional, or discursive patterns that are associated with how sexist language manifests across different settings or speaker profiles.
+
+
+## 6. Conclusions
+
+The analysis of Spanish parliamentary discourse from 2019 to 2023 reveals that sexist interventions are most commonly expressed through ridicule, followed by invisibilizing and blaming tactics. Right-wing parties, particularly Vox and Partido Popular, contribute disproportionately to sexist speech, both in volume and proportion relative to their overall interventions. Peaks in sexist discourse align with key gender-related legislative debates, and sexist interventions are more frequent in specific rural and mid-sized constituencies, highlighting the influence of regional and political contexts. While less common, left-leaning parties also contribute to sexist discourse in certain areas, showing it is not exclusive to the right.
+
+Despite some limitations observed in the neural network models trained on this data, related to the complexity and imbalance of the dataset, the analysis confirmed that specific words, especially those addressing women politicians and ministers, along with party affiliation and regional factors, significantly influence the presence of sexism in parliamentary interventions.
+
+## 7. Limitations
+
+Due to limited computational resources, it was not feasible to train or fine-tune more advanced language models. Instead, the annotation of sexist discourse relied on OpenAI’s GPT-4o-mini, a pre-trained model chosen for its efficiency in processing large textual corpora. While this model enables efficient processing of extensive textual data, it is also prone to both false positives and false negatives, which may distort the identification of sexist discourse by either mislabeling neutral content or overlooking more subtle forms of language strategies (Pangakis, Wolken, & Fasching, 2023).
+
+Different models were subsequently trained to classify the annotated data. However, due to resource constraints, it was not possible to train a computationally expensive or large-scale models facing challenges in capturing the complexity of the data, especially given its unbalanced nature, with sexist discourse comprising only a small fraction of the corpus.
+
+This imbalance significantly affected the performance, leading to difficulties in generalizing patterns. Furthermore, the models struggled to process large text strings, which are typical in parliamentary discourse where interventions can span multiple paragraphs and include complex rhetorical structures. These limitations reduced the overall robustness of the classifier and constrained the reliability of the results, particularly in detecting subtle or contextually embedded instances of gender bias. Future iterations would benefit from both more training data and greater computational capacity to develop more sophisticated and context-aware models.
+
+
+## 8. References
+
+Chawla, N. V., Bowyer, K. W., Hall, L. O., & Kegelmeyer, W. P. (2002). SMOTE: synthetic minority over-sampling technique. *Journal of artificial intelligence research*, 16, 321-357.
+
+He, H., & Garcia, E. A. (2009). Learning from imbalanced data. *IEEE Transactions on knowledge and data engineering*, 21(9), 1263-1284.
+
+Ilie, C. (2018). “Behave yourself, woman!” Patterns of gender discrimination and sexist stereotyping in parliamentary interaction. *Journal of Language and Politics*, 17(5), 594-616.
+
+Lunardon, N., Menardi, G., & Torelli, N. (2014). ROSE: a Package for Binary Imbalanced Learning. *The R Journal*, 6(1), 79. https://doi.org/10.32614/RJ-2014-008
+
+Pangakis, N., Wolken, S., & Fasching, N. (2023). *Automated Annotation with Generative AI Requires Validation*. https://doi.org/10.48550/arxiv.2306.00176
+
+Sepp Hochreiter, Jürgen Schmidhuber; Long Short-Term Memory. *Neural Comput 1997*; 9 (8): 1735–1780. doi: https://doi.org/10.1162/neco.1997.9.8.1735
+
+
+
